@@ -29,6 +29,7 @@ class ExecutionResult(BaseModel):
     status: str
     output: Optional[str] = None
     error: Optional[str] = None
+    plot: Optional[str] = None # Base64 encoded image
 
 
 async def get_databricks_client():
@@ -121,7 +122,7 @@ async def execute_code(request: ExecuteRequest):
         import asyncio
         await asyncio.sleep(1)
         return ExecutionResult(
-            status="finished",
+            status="success",
             output=f"[Mock Execution] Result: {len(request.code)} chars processed.\nData processed successfully."
         )
 
@@ -188,8 +189,23 @@ async def execute_code(request: ExecuteRequest):
                      return ExecutionResult(status="error", error=error_msg)
                 
                 # Handle different output types
-                output_content = str(result_data.get("data", ""))
-                return ExecutionResult(status="finished", output=output_content)
+                plot_data = None
+                if result_data.get("resultType") == "image":
+                    plot_data = result_data.get("data", "")
+                
+                output_content = str(result_data.get("data", "")) if result_data.get("resultType") != "image" else ""
+                
+                # Check for table schema (Pandas/Spark DataFrame display)
+                if result_data.get("resultType") == "table":
+                     # For now, just convert table data to string representation for the agent
+                     # Ideally we'd parse this into a markdown table
+                     output_content = str(result_data.get("data", ""))
+
+                return ExecutionResult(
+                    status="success", 
+                    output=output_content,
+                    plot=plot_data
+                )
             
             if status_data["status"] in ["Cancelled", "Error"]:
                 return ExecutionResult(status="error", error="Execution failed or cancelled")

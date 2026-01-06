@@ -67,7 +67,7 @@ At the bottom, provide 2-3 short "Suggestions:" for query improvements."""
             }
         ]
     
-    async def execute(self, query: str, context: Dict = None) -> AgentResponse:
+    async def execute(self, query: str, context: Dict = None, callback=None) -> AgentResponse:
         """Generate SQL query from natural language"""
         # Enhance system prompt with schema info if available
         enhanced_prompt = self._get_system_prompt()
@@ -76,4 +76,4 @@ At the bottom, provide 2-3 short "Suggestions:" for query improvements."""
             enhanced_prompt += f"\n\nDatabase Schema:\n{context['schema']}"
         
         # Use base execution with enhanced prompt
-        return await super().execute(query, context)
+        return await super().execute(query, context, callback=callback)

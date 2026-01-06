@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 import sys
 import os
+import asyncio
 
 # Add backend to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
@@ -22,6 +23,7 @@ class AgentResponse:
     metadata: Dict[str, Any] = None
     success: bool = True
     error: Optional[str] = None
+    plot: Optional[str] = None # Base64 encoded image
 
 
 class BaseAgent(ABC):
@@ -159,13 +161,14 @@ DATA ACCESS POLICY:
         
         return context
     
-    async def execute(self, query: str, context: Dict = None) -> AgentResponse:
+    async def execute(self, query: str, context: Dict = None, callback=None) -> AgentResponse:
         """
         Execute the agent with a query
         
         Args:
             query: User query or task
             context: Optional additional context
+            callback: Async function to report intermediate progress (typing: function(event_type: str, content: str))
             
         Returns:
             AgentResponse with results
@@ -178,53 +181,196 @@ DATA ACCESS POLICY:
             full_context = {**(context or {}), **retrieved_context}
             
             # Build prompt with data access policy first
-            system_prompt = self._get_data_access_policy() + "\n" + self._get_system_prompt()
+            base_system_prompt = self._get_data_access_policy() + "\n" + self._get_system_prompt()
             
             # Add retrieved context (with source attribution)
             if retrieved_context.get("context_text"):
-                system_prompt += f"\n\n{retrieved_context['context_text']}"
+                base_system_prompt += f"\n\n{retrieved_context['context_text']}"
             elif retrieved_context["rag_results"]:
-                # Fallback for backward compatibility
                 rag_text = "\n".join([str(r) for r in retrieved_context["rag_results"][:5]])
-                system_prompt += f"\n\nRelevant information from uploaded documents:\n{rag_text}"
+                base_system_prompt += f"\n\nRelevant information from uploaded documents:\n{rag_text}"
             
-            # Add conversation history if available
+            # Add conversation history
             if full_context.get("conversation_history"):
-                system_prompt += f"\n\nConversation History:\n{full_context['conversation_history']}"
+                base_system_prompt += f"\n\nConversation History:\n{full_context['conversation_history']}"
+
+            messages = [{"role": "system", "content": base_system_prompt}]
+            messages.append({"role": "user", "content": query})
+
+            # ReAct Loop
+            max_steps = 10
+            max_retries = 3
+            step_count = 0
+            retry_count = 0
             
-            # Execute with LLM
-            if self.llm:
-                try:
-                    response = await self.llm.simple_chat(
-                        user_message=query,
-                        system_message=system_prompt
-                    )
-                except Exception as llm_error:
-                    print(f"LLM execution error: {llm_error}")
-                    response = f"[{self.name}] I'm having trouble connecting to the AI service. Error: {str(llm_error) or 'Unknown'}"
-            else:
-                # Provide a meaningful fallback response
-                response = f"Hello! I'm the {self.name} agent. I understood your query: '{query}'\n\n"
-                response += "However, the AI model is not currently available. "
-                response += "Please ensure Azure OpenAI is properly configured.\n\n"
-                if retrieved_context.get("rag_results"):
-                    response += f"I found {len(retrieved_context['rag_results'])} relevant documents that might help."
-            
-            # Include sources used in response metadata
-            sources_used = retrieved_context.get("sources_used", [])
-            
+            if callback:
+                await callback("thinking", f"Planning how to answer: {query}")
+
+            print(f"DEBUG: [{self.name}] starting execute with query: {query[:50]}...")
+            while step_count < max_steps:
+                if self.llm:
+                    print(f"DEBUG: [{self.name}] Step {step_count} - Calling LLM...")
+                    try:
+                        # 1. Plan / Think
+                        tools = self._get_tools()
+                        
+                        # Call LLM with tools
+                        response_message = await self.llm.chat_completion(
+                            messages=messages,
+                            tools=tools if tools else None,
+                            tool_choice="auto" if tools else None 
+                        )
+                        
+                        print(f"DEBUG: [{self.name}] LLM Response Content: {response_message.content[:100]}...")
+                        
+                        # Check for tool calls
+                        tool_calls = self.llm.parse_tool_calls(response_message)
+                        
+                        if tool_calls:
+                            print(f"DEBUG: [{self.name}] Detected {len(tool_calls)} tool calls")
+                            # 2. Act (Execute Tool)
+                            
+                            # CRITICAL: Nullify content if tool calls are present to prevent LLM from "reading its own chatter"
+                            # This fixes the "Echo" bug where the agent repeats its own tool call string.
+                            if response_message.content:
+                                print(f"DEBUG: [{self.name}] Clearing assistant content to prioritize tool calls")
+                                response_message.content = None
+                                
+                            messages.append(response_message) # Add assistant's thought/tool_call to history
+                            
+                            for tool_call in tool_calls:
+                                function_name = tool_call.function.name
+                                function_args = tool_call.function.arguments
+                                print(f"DEBUG: [{self.name}] Executing tool: {function_name} with args: {function_args}")
+                                
+                                if callback:
+                                    await callback("thinking", f"Executing tool: {function_name}")
+                                
+                                try:
+                                    import json
+                                    args = json.loads(function_args)
+                                    
+                                    # DYNAMIC TOOL HANDLING
+                                    tool_output = None
+                                    
+                                    # 1. Check if the agent has a method for this tool (e.g. SQLAgent.execute_sql)
+                                    if hasattr(self, function_name) and function_name != "execute":
+                                        method = getattr(self, function_name)
+                                        if callable(method):
+                                            print(f"DEBUG: [{self.name}] Calling class method for {function_name}")
+                                            tool_output = await method(**args) if asyncio.iscoroutinefunction(method) else method(**args)
+                                    
+                                    # 2. Handle known cross-agent tools (Databricks)
+                                    elif function_name == "execute_databricks_code":
+                                        print(f"DEBUG: [{self.name}] Calling execute_databricks_code handler")
+                                        from app.api.v1.endpoints.databricks import execute_code, ExecuteRequest
+                                        code = args.get("code")
+                                        language = args.get("language", "python")
+                                        
+                                        if callback:
+                                            await callback("code_execution", f"Running {language} code:\n{code}")
+                                        
+                                        cluster_id = full_context.get("cluster_id", "mock-cluster-1")
+                                        result = await execute_code(ExecuteRequest(
+                                            cluster_id=cluster_id,
+                                            code=code,
+                                            language=language
+                                        ))
+                                        
+                                        tool_output = {
+                                            "status": result.status,
+                                            "output": result.output,
+                                            "error": result.error,
+                                            "plot": "Plot generated" if result.plot else None
+                                        }
+                                        
+                                        if callback:
+                                            if result.status == "success":
+                                                await callback("observation", f"Execution successful. Output len: {len(result.output or '')}")
+                                            else:
+                                                await callback("observation", f"Execution failed: {result.error}")
+                                    
+                                    # 3. Handle default routing for Orchestrator (Terminal Action)
+                                    elif function_name == "route_to_agent":
+                                        target = args.get("agent_name")
+                                        query_to_route = args.get("query", query)
+                                        print(f"DEBUG: [{self.name}] Routing to {target} with query: {query_to_route[:50]}...")
+                                        
+                                        from agents.registry import AgentRegistry
+                                        target_agent = AgentRegistry.get_agent(target)
+                                        if target_agent:
+                                            print(f"DEBUG: [{self.name}] Found target agent {target}, delegating...")
+                                            # TERMINAL: Directly return the target agent's response to the user
+                                            delegated_response = await target_agent.execute(query_to_route, context, callback=callback)
+                                            print(f"DEBUG: [{self.name}] Received delegated response from {target}")
+                                            return delegated_response
+                                        else:
+                                            print(f"DEBUG: [{self.name}] Agent {target} not found in registry")
+                                            tool_output = {"status": "error", "error": f"Agent {target} not found"}
+                                            
+                                    else:
+                                        print(f"DEBUG: [{self.name}] Tool {function_name} not implemented")
+                                        tool_output = {"status": "error", "error": f"Tool {function_name} not implemented"}
+                                        
+                                except Exception as e:
+                                    print(f"DEBUG: [{self.name}] Exception during tool {function_name}: {str(e)}")
+                                    tool_output = {"status": "error", "error": str(e)}
+                                    if callback:
+                                        await callback("observation", f"Tool execution exception: {str(e)}")
+                                        
+                                # 3. Observe (Feed back to LLM)
+                                messages.append({
+                                    "tool_call_id": tool_call.id,
+                                    "role": "tool",
+                                    "name": function_name,
+                                    "content": json.dumps(tool_output) if not isinstance(tool_output, str) else tool_output
+                                })
+                            
+                            step_count += 1
+                        
+                            # No tool calls -> Final Answer
+                            content = response_message.content
+                            
+                            # SANITY CHECK: If content looks like a tool call string, it's likely an echo or mistake.
+                            # We don't want to return "route_to_agent(...)" as the final answer.
+                            if content and ("route_to_agent" in content or "execute_databricks_code" in content):
+                                print(f"DEBUG: [{self.name}] Final content looks like a tool call string. Attempting recovery turn.")
+                                # If it's the Orchestrator, it might have failed to use the real tool but wrote it in text.
+                                # Let's try to parse it as a tool call one last time or just take another turn.
+                                step_count += 1
+                                continue
+                            
+                            print(f"DEBUG: [{self.name}] No more tool calls. Forming final response.")
+                            sources_used = retrieved_context.get("sources_used", [])
+                            sources_used = retrieved_context.get("sources_used", [])
+                            
+                            return AgentResponse(
+                                content=content,
+                                agent_name=self.name,
+                                sources=sources_used + [str(r.get("title", r.get("content", "")[:50])) for r in retrieved_context.get("rag_results", [])[:3]],
+                                metadata={
+                                    "context_used": bool(retrieved_context["rag_results"]),
+                                    "sources_used": sources_used,
+                                    "data_access": "Hybrid RAG + Code Interpreter"
+                                },
+                                success=True
+                            )
+
+                    except Exception as llm_error:
+                        print(f"LLM execution error: {llm_error}")
+                        retry_count += 1
+                        if retry_count >= max_retries:
+                             raise llm_error
+                else:
+                    break
+
             return AgentResponse(
-                content=response,
+                content="I tried to process your request but reached the maximum allowed steps or encountered repeated errors.",
                 agent_name=self.name,
-                sources=sources_used + [str(r.get("title", r.get("content", "")[:50])) for r in retrieved_context.get("rag_results", [])[:3]],
-                metadata={
-                    "context_used": bool(retrieved_context["rag_results"]),
-                    "sources_used": sources_used,
-                    "data_access": "RAG/KAG only"
-                },
-                success=True
+                success=False,
+                error="Max steps or retries exceeded"
             )
-            
+
         except Exception as e:
             error_msg = str(e) if str(e) else f"Unknown error in {self.name} agent"
             print(f"Agent execution error: {error_msg}")

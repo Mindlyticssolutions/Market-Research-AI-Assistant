@@ -25,6 +25,8 @@ export interface Query {
   artifacts: QueryArtifact[];
   createdAt: Date;
   updatedAt: Date;
+  status?: 'idle' | 'running' | 'success' | 'error';
+  type?: 'code' | 'markdown';
 }
 
 export interface AIMessage {
@@ -33,7 +35,10 @@ export interface AIMessage {
   content: string;
   code?: string;
   suggestions?: string[];
+  plot?: string;
+  executionLogs?: string[];
   timestamp: Date;
+  isThinking?: boolean;
 }
 
 interface AppState {
@@ -42,7 +47,7 @@ interface AppState {
   isConnected: boolean;
   addDataSource: (source: Omit<DataSource, 'id' | 'connectedAt'>) => void;
   removeDataSource: (id: string) => void;
-  
+
   // Queries
   queries: Query[];
   activeQueryId: string | null;
@@ -51,12 +56,14 @@ interface AppState {
   removeQuery: (id: string) => void;
   setActiveQuery: (id: string | null) => void;
   getActiveQuery: () => Query | null;
-  
+
   // AI Assistant
   aiMessages: AIMessage[];
-  addAIMessage: (role: 'user' | 'assistant', content: string, code?: string, suggestions?: string[]) => void;
+  addAIMessage: (role: 'user' | 'assistant', content: string, code?: string, suggestions?: string[], plot?: string) => string; // Return ID
+  appendExecutionLog: (messageId: string, log: string) => void;
+  updateAIMessage: (id: string, updates: Partial<AIMessage>) => void;
   clearAIMessages: () => void;
-  
+
   // UI State
   isSidebarCollapsed: boolean;
   isAIPanelCollapsed: boolean;
@@ -64,11 +71,17 @@ interface AppState {
   toggleAIPanel: () => void;
   aiScrollPosition: number;
   setAIScrollPosition: (position: number) => void;
-  
+
   // Modal State
   activeArtifact: QueryArtifact | null;
   activeArtifactCode: string | null;
   setActiveArtifact: (artifact: QueryArtifact | null, code?: string) => void;
+
+  // Plot State
+  activePlot: string | null;
+  activePlotCode: string | null;
+  setActivePlot: (plot: string | null) => void;
+  setActivePlotCode: (code: string | null) => void;
 }
 
 export const useAppStore = create<AppState>()(
@@ -77,7 +90,7 @@ export const useAppStore = create<AppState>()(
       // Data Sources
       dataSources: [],
       isConnected: false,
-      
+
       addDataSource: (source) => {
         const newSource: DataSource = {
           ...source,
@@ -89,7 +102,7 @@ export const useAppStore = create<AppState>()(
           isConnected: true,
         }));
       },
-      
+
       removeDataSource: (id) => {
         set((state) => {
           const newSources = state.dataSources.filter((s) => s.id !== id);
@@ -99,7 +112,7 @@ export const useAppStore = create<AppState>()(
           };
         });
       },
-      
+
       // Queries - Demo workflow data
       queries: [
         {
@@ -205,7 +218,7 @@ for feat, imp in zip(X.columns, model.feature_importances_):
         },
       ],
       activeQueryId: 'demo-query-1',
-      
+
       addQuery: (prompt, code) => {
         const newQuery: Query = {
           id: crypto.randomUUID(),
@@ -223,7 +236,7 @@ for feat, imp in zip(X.columns, model.feature_importances_):
         }));
         return newQuery;
       },
-      
+
       updateQuery: (id, updates) => {
         set((state) => ({
           queries: state.queries.map((q) =>
@@ -233,58 +246,93 @@ for feat, imp in zip(X.columns, model.feature_importances_):
       },
 
       removeQuery: (id) => {
-        set((state) => ({
-          queries: state.queries.filter((q) => q.id !== id),
-          activeQueryId: state.activeQueryId === id ? null : state.activeQueryId,
-        }));
+        set((state) => {
+          const newQueries = state.queries
+            .filter((q) => q.id !== id)
+            .map((q, index) => ({ ...q, number: index + 1 }));
+
+          return {
+            queries: newQueries,
+            activeQueryId: state.activeQueryId === id ? null : state.activeQueryId,
+          };
+        });
       },
-      
+
       setActiveQuery: (id) => set({ activeQueryId: id }),
-      
+
       getActiveQuery: () => {
         const state = get();
         return state.queries.find((q) => q.id === state.activeQueryId) || null;
       },
-      
+
       // AI Assistant
       aiMessages: [],
-      
-      addAIMessage: (role, content, code, suggestions) => {
+
+      addAIMessage: (role, content, code, suggestions, plot) => {
+        const id = crypto.randomUUID();
         const newMessage: AIMessage = {
-          id: crypto.randomUUID(),
+          id,
           role,
           content,
           code,
           suggestions,
+          plot,
           timestamp: new Date(),
+          executionLogs: [],
+          isThinking: role === 'assistant'
         };
         set((state) => ({
           aiMessages: [...state.aiMessages, newMessage],
         }));
+        return id;
       },
-      
+
+      appendExecutionLog: (messageId, log) => {
+        set((state) => ({
+          aiMessages: state.aiMessages.map((msg) =>
+            msg.id === messageId
+              ? { ...msg, executionLogs: [...(msg.executionLogs || []), log] }
+              : msg
+          ),
+        }));
+      },
+
+      updateAIMessage: (id, updates) => {
+        set((state) => ({
+          aiMessages: state.aiMessages.map((msg) =>
+            msg.id === id ? { ...msg, ...updates } : msg
+          ),
+        }));
+      },
+
       clearAIMessages: () => set({ aiMessages: [] }),
-      
+
       // UI State
       isSidebarCollapsed: false,
       isAIPanelCollapsed: false,
-      
+
       toggleSidebar: () =>
         set((state) => ({ isSidebarCollapsed: !state.isSidebarCollapsed })),
-      
+
       toggleAIPanel: () =>
         set((state) => ({ isAIPanelCollapsed: !state.isAIPanelCollapsed })),
-      
+
       aiScrollPosition: 0,
       setAIScrollPosition: (position) => set({ aiScrollPosition: position }),
-      
-      
+
+
       // Modal State
       activeArtifact: null,
       activeArtifactCode: null,
-      
+
       setActiveArtifact: (artifact, code) =>
         set({ activeArtifact: artifact, activeArtifactCode: code || null }),
+
+      // Plot State
+      activePlot: null,
+      activePlotCode: null,
+      setActivePlot: (plot) => set({ activePlot: plot }),
+      setActivePlotCode: (code) => set({ activePlotCode: code }),
     }),
     {
       name: 'analytix-storage',
@@ -294,6 +342,7 @@ for feat, imp in zip(X.columns, model.feature_importances_):
         aiMessages: state.aiMessages,
         isConnected: state.isConnected,
         aiScrollPosition: state.aiScrollPosition,
+        activePlot: state.activePlot,
       }),
     }
   )

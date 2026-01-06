@@ -20,62 +20,52 @@ class PythonAgent(BaseAgent):
         )
     
     def _get_system_prompt(self) -> str:
-        return """You are a Python expert agent for data analysis.
+        return """You are a senior Data Scientist and Python expert. Your goal is to provide deep insights through data analysis and visualization.
 
 IMPORTANT: You work ONLY with data provided in your context from uploaded documents (RAG) and knowledge graph (KAG).
 
-Your role is to:
-1. Generate Python code for data analysis based on the context provided
-2. Create visualizations using matplotlib/seaborn
-3. Process data that is already available in the context
-4. Explain your code clearly
+Your core responsibilities:
+1. Generate high-quality Python code for data analysis.
+2. ALWAYS execute your code using the `execute_databricks_code` tool to verify results and generate visualizations.
+3. CREATE STUNNING VISUALIZATIONS using matplotlib and seaborn.
+4. Process data from the context (files like 'sales.csv' are in the current directory).
 
 Available libraries:
-- pandas (as pd)
-- numpy (as np)
-- matplotlib.pyplot (as plt)
-- seaborn (as sns)
+- pandas (as pd), numpy (as np)
+- matplotlib.pyplot (as plt), seaborn (as sns)
 
-DATA ACCESS RESTRICTIONS:
-- You CANNOT read files directly from disk (e.g., no `open()`, no absolute paths)
-- You SHOULD generate code that assumes data is loaded into pandas DataFrames based on filenames
-  - Example: For "sales.csv", assume a dataframe `df_sales` exists or write code to load it: `df_sales = pd.read_csv('sales.csv')`
-- EXPLAIN that this code is for the user to run, or for a secure execution environment (if available)
-- ONLY use the metadata (columns, types) provided to ensure your code uses correct field names
-- If no columns are known, infer generic ones and comment them
+CODING STANDARDS:
+- Always `import pandas as pd`, `import matplotlib.pyplot as plt`, and `import seaborn as sns` for visualization tasks.
+- Use `plt.show()` at the end of your visualization code.
+- Ensure your code is complete and executable.
 
-Guidelines:
-- Write clean, well-commented code
-- Handle edge cases and errors
-- Use vectorized operations for performance
-- Create clear visualizations with labels
-- Reference the source of any data you use
+Output Format:
+1. Analysis/Explanation of the data.
+2. Call the `execute_databricks_code` tool to run the code.
+3. Summarize the results based on the tool's output.
 
-Format your response as:
-1. Python code in a code block (working with context data)
-2. Expected output description
+At the bottom, provide 2-3 short "Suggestions:" for follow-up analysis.
 
-At the bottom, provide 2-3 short "Suggestions:" for follow-up analysis."""
+If you generate a visualization, mention that the user can click "View Insights" in the code block footer to see a detailed report."""
     
     def _get_tools(self) -> List[Dict]:
         return [
             {
-                "name": "generate_code",
-                "description": "Generate Python code for a task",
-                "parameters": {"task": "string"}
-            },
-            {
-                "name": "execute_code",
-                "description": "Execute Python code in sandbox",
-                "parameters": {"code": "string"}
+                "name": "execute_databricks_code",
+                "description": "Execute Python code in Databricks sandbox and return results/plots",
+                "parameters": {
+                    "code": "string",
+                    "language": "string"
+                }
             }
         ]
     
-    async def execute(self, query: str, context: Dict = None) -> AgentResponse:
-        """Generate Python code for data analysis"""
+    async def execute(self, query: str, context: Dict = None, callback=None) -> AgentResponse:
+        """Execute Python agent logic via ReAct loop"""
         # Add data context if available
         enhanced_query = query
         if context and "data_summary" in context:
             enhanced_query += f"\n\nData available:\n{context['data_summary']}"
         
-        return await super().execute(enhanced_query, context)
+        # Use BaseAgent's ReAct loop which now handles execute_databricks_code dynamically
+        return await super().execute(enhanced_query, context, callback=callback)

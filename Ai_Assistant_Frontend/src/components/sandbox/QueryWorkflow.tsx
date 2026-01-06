@@ -55,19 +55,19 @@ export function QueryWorkflow() {
           )
         ) : (
           queries.map((query, index) => (
-            <motion.button
+            <motion.div
               key={query.id}
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: index * 0.05 }}
               onClick={() => setActiveQuery(query.id)}
               className={cn(
-                'w-full text-left rounded-lg transition-all relative group',
-                'hover:bg-sidebar-accent',
+                'w-full text-left rounded-xl transition-all relative group cursor-pointer border',
+                'hover:bg-sidebar-accent hover:border-primary/20 hover:shadow-md',
                 isCollapsed ? 'p-2 flex items-center justify-center' : 'p-3',
                 activeQueryId === query.id
-                  ? 'bg-sidebar-accent border border-primary/30'
-                  : 'bg-transparent'
+                  ? 'bg-sidebar-accent border-primary shadow-sm ring-1 ring-primary/20'
+                  : 'bg-transparent border-transparent'
               )}
               title={isCollapsed ? `Query ${query.number}: ${query.prompt}` : undefined}
             >
@@ -111,7 +111,7 @@ export function QueryWorkflow() {
                   <X className="w-3 h-3" />
                 </button>
               )}
-            </motion.button>
+            </motion.div>
           ))
         )}
       </div>

@@ -7,6 +7,7 @@ import { ThemeProvider } from "next-themes";
 import { AppLayout } from "@/components/layout/AppLayout";
 import Home from "./pages/Home";
 import Sandbox from "./pages/Sandbox";
+import Insights from "./pages/Insights";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
@@ -22,6 +23,7 @@ const App = () => (
             <Route element={<AppLayout />}>
               <Route path="/" element={<Home />} />
               <Route path="/sandbox" element={<Sandbox />} />
+              <Route path="/insights" element={<Insights />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>

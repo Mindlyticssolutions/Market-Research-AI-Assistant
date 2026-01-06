@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Sparkles, Code, ChevronRight, ChevronLeft, Copy, Check, ArrowDown } from 'lucide-react';
+import { Send, Sparkles, Code, ChevronRight, ChevronLeft, Copy, Check, ArrowDown, TrendingUp } from 'lucide-react';
 import { useAppStore } from '@/store/appStore';
 import { useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
@@ -16,7 +16,9 @@ export function AIAssistant() {
   const isAIPanelCollapsed = useAppStore(state => state.isAIPanelCollapsed);
   const toggleAIPanel = useAppStore(state => state.toggleAIPanel);
   const setAIScrollPosition = useAppStore(state => state.setAIScrollPosition);
-  
+  const setActivePlotCode = useAppStore(state => state.setActivePlotCode);
+  const setActivePlot = useAppStore(state => state.setActivePlot);
+
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -36,7 +38,7 @@ export function AIAssistant() {
       const handleScroll = () => {
         const { scrollTop, scrollHeight, clientHeight } = container;
         setAIScrollPosition(scrollTop); // Save position
-        
+
         const isNearBottom = scrollHeight - Math.ceil(scrollTop) - clientHeight < 250; // Increased threshold
         setShouldAutoScroll(isNearBottom);
       };
@@ -52,7 +54,7 @@ export function AIAssistant() {
         // Check initial button visibility after restoration
         handleScroll();
       }, 0);
-      
+
       return () => container.removeEventListener('scroll', handleScroll);
     }
   }, []);
@@ -61,65 +63,137 @@ export function AIAssistant() {
 
 
 
+  const updateAIMessage = useAppStore(state => state.updateAIMessage);
+  const appendExecutionLog = useAppStore(state => state.appendExecutionLog);
+
   const handleSend = async (text?: string) => {
     const userInput = text || input;
     if (!userInput.trim()) return;
 
+    // 1. Add User Message
     addAIMessage('user', userInput);
     setInput('');
-    // Reset textarea height
     const textarea = document.querySelector('textarea');
-    if (textarea) {
-      textarea.style.height = 'auto';
-    }
+    if (textarea) textarea.style.height = 'auto';
     setIsTyping(true);
-    setShouldAutoScroll(true); // Always auto-scroll on new message
+    setShouldAutoScroll(true);
+
+    setActivePlot(null);
+    setActivePlotCode(null);
 
     try {
-      // Import chat service dynamically to avoid circular deps
+      // 2. Add empty Assistant Message (placeholder)
+      // We pass empty content. The store will init logs.
+      const messageId = addAIMessage('assistant', '');
+
+      // 3. Import chat service for URL
       const { chatService } = await import('@/services/chatService');
-      
-      // Call backend API
-      const response = await chatService.sendMessage(userInput, 'orchestrator');
-      
-      let fullResponse = response.response;
-      let suggestions: string[] = [];
-      let code: string | undefined;
+      const wsUrl = chatService.getStreamUrl();
 
-      // Extract code if present in response
-      if (fullResponse.includes('```')) {
-        const codeMatch = fullResponse.match(/```(?:\w+)?\n?([\s\S]*?)```/);
-        code = codeMatch ? codeMatch[1].trim() : undefined;
-        // Only strip the code from the message if we successfully extracted it
-        if (code) {
-           fullResponse = fullResponse.replace(/```(?:\w+)?\n?[\s\S]*?```/g, '').trim();
+      // 4. Connect WebSocket
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({
+          message: userInput,
+          agent: 'orchestrator' // Default agent
+        }));
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === 'status') {
+          // e.g. "processing"
+        } else if (data.type === 'thinking') {
+          appendExecutionLog(messageId, data.content);
+        } else if (data.type === 'code_execution') {
+          appendExecutionLog(messageId, data.content);
+
+          // Sync with Sandbox
+          let codeToSync = data.content;
+          // Extract code if wrapped in markdown
+          if (codeToSync.includes('```')) {
+            const match = codeToSync.match(/```(?:\w+)?\n?([\s\S]*?)```/);
+            if (match) codeToSync = match[1].trim();
+          }
+          // Also strip "Running python code:\n" prefix if present from the log message
+          if (codeToSync.startsWith("Running python code:\n")) {
+            codeToSync = codeToSync.replace("Running python code:\n", "");
+          } else if (codeToSync.startsWith("Running")) {
+            // Try to find the code part
+            const parts = codeToSync.split(":\n");
+            if (parts.length > 1) {
+              codeToSync = parts.slice(1).join(":\n");
+            }
+          }
+
+          // Update Sandbox Store
+          addQuery("AI Generated execution", codeToSync);
+          navigate('/sandbox');
+
+        } else if (data.type === 'observation') {
+          appendExecutionLog(messageId, data.content);
+        } else if (data.type === 'response') {
+          // Final response
+          let fullResponse = data.content;
+          let suggestions: string[] = [];
+          let code: string | undefined;
+          let plot: string | undefined = data.plot;
+
+          // Parse code/suggestions (reuse existing logic)
+          if (fullResponse.includes('```')) {
+            const codeMatch = fullResponse.match(/```(?:\w+)?\n?([\s\S]*?)```/);
+            code = codeMatch ? codeMatch[1].trim() : undefined;
+            if (code) {
+              fullResponse = fullResponse.replace(/```(?:\w+)?\n?[\s\S]*?```/g, '').trim();
+            }
+          }
+
+          const suggestionMatch = fullResponse.match(/(?:^|\n)(?:Suggestions|Suggested Next Steps):([\s\S]*)$/i);
+          if (suggestionMatch) {
+            const suggestionText = suggestionMatch[1];
+            suggestions = suggestionText.split('\n').map(l => l.trim()).filter(l => l.startsWith('-') || l.startsWith('•')).map(l => l.substring(1).trim());
+            fullResponse = fullResponse.substring(0, suggestionMatch.index).trim();
+          }
+
+          updateAIMessage(messageId, {
+            content: fullResponse,
+            code,
+            suggestions: suggestions.length > 0 ? suggestions : undefined,
+            plot,
+            isThinking: false
+          });
+
+          if (plot) {
+            const setActivePlot = useAppStore.getState().setActivePlot;
+            setActivePlot(plot);
+            if (code) setActivePlotCode(code);
+          }
+
+          setIsTyping(false);
+          ws.close();
+        } else if (data.type === 'error') {
+          updateAIMessage(messageId, {
+            content: `Error: ${data.message}`,
+            isThinking: false
+          });
+          setIsTyping(false);
+          ws.close();
         }
-      }
+      };
 
-      // Extract suggestions (looking for "Suggestions:" block)
-      const suggestionMatch = fullResponse.match(/(?:^|\n)(?:Suggestions|Suggested Next Steps):([\s\S]*)$/i);
-      if (suggestionMatch) {
-         const suggestionText = suggestionMatch[1];
-         suggestions = suggestionText
-           .split('\n')
-           .map(line => line.trim())
-           .filter(line => line.startsWith('-') || line.startsWith('•'))
-           .map(line => line.substring(1).trim());
-         
-         // Remove suggestions from displayed content
-         fullResponse = fullResponse.substring(0, suggestionMatch.index).trim();
-      }
-      
-      addAIMessage('assistant', fullResponse, code, suggestions.length > 0 ? suggestions : undefined);
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        updateAIMessage(messageId, {
+          content: "Connection error. Please ensure backend is running.",
+          isThinking: false
+        });
+        setIsTyping(false);
+      };
 
     } catch (error) {
-      console.error('Chat error:', error);
-      // Fallback to showing error message
-      addAIMessage(
-        'assistant',
-        `I encountered an issue connecting to the backend. Please make sure the server is running at http://localhost:8000.`
-      );
-    } finally {
+      console.error("Setup error:", error);
       setIsTyping(false);
     }
   };
@@ -176,7 +250,7 @@ export function AIAssistant() {
       </div>
 
       {/* Messages */}
-      <div 
+      <div
         ref={messagesContainerRef}
         className="flex-1 overflow-y-auto p-4 space-y-4"
       >
@@ -212,8 +286,40 @@ export function AIAssistant() {
                     : 'bg-muted text-foreground'
                 )}
               >
-                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                
+                {/* Thinking Process */}
+                {(message.executionLogs && message.executionLogs.length > 0) && (
+                  <div className="mb-3 rounded-lg border border-border/50 bg-background/50 overflow-hidden">
+                    <button
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-muted/50 transition-colors"
+                      onClick={(e) => {
+                        const logs = e.currentTarget.nextElementSibling;
+                        logs?.classList.toggle('hidden');
+                        e.currentTarget.querySelector('svg')?.classList.toggle('rotate-180');
+                      }}
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      Thinking Process ({message.executionLogs.length} steps)
+                      <ChevronRight className="w-3.5 h-3.5 ml-auto transition-transform" />
+                    </button>
+                    <div className="hidden border-t border-border/50 bg-editor-bg p-3 space-y-2">
+                      {message.executionLogs.map((log, i) => (
+                        <div key={i} className="flex gap-2 text-xs font-mono text-muted-foreground/80">
+                          <span className="opacity-50 select-none">{(i + 1).toString().padStart(2, '0')}</span>
+                          <span className="whitespace-pre-wrap font-mono">{log}</span>
+                        </div>
+                      ))}
+                      {message.isThinking && (
+                        <div className="flex gap-2 text-xs text-primary animate-pulse">
+                          <span className="opacity-50">..</span>
+                          <span>Thinking...</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <p className="text-sm whitespace-pre-wrap">{message.content || (message.isThinking ? '' : 'No content')}</p>
+
                 {message.code && (
                   <div className="mt-3 rounded-lg overflow-hidden border border-border/50">
                     <div className="flex items-center justify-between px-3 py-2 bg-editor-bg border-b border-border/50">
@@ -235,11 +341,11 @@ export function AIAssistant() {
                     <pre className="p-3 text-xs font-mono bg-editor-bg text-foreground overflow-x-auto">
                       {message.code}
                     </pre>
-                    <div className="px-3 py-2 bg-editor-bg border-t border-border/50">
+                    <div className="px-3 py-2 bg-editor-bg border-t border-border/50 flex gap-2">
                       <Button
                         size="sm"
                         onClick={() => handleSendToSandbox(message.code!, message.content)}
-                        className="w-full gap-2"
+                        className="flex-1 gap-2"
                       >
                         <Send className="w-3.5 h-3.5" />
                         Send to Sandbox
@@ -248,7 +354,7 @@ export function AIAssistant() {
                   </div>
                 )}
               </div>
-              
+
               {/* Suggestions Chips */}
               {message.suggestions && message.suggestions.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-2 max-w-[90%] pl-1">
@@ -282,11 +388,11 @@ export function AIAssistant() {
             </div>
           </motion.div>
         )}
-        
+
         <div ref={messagesEndRef} />
-        
+
       </div>
-      
+
 
 
       {/* Input */}

@@ -14,6 +14,7 @@ interface NotebookCellProps {
   output?: string;
   status?: 'idle' | 'running' | 'success' | 'error';
   type: 'code' | 'markdown';
+  isActive?: boolean;
   onCodeChange: (value: string) => void;
   onRun: () => void;
   onDelete: () => void;
@@ -26,6 +27,7 @@ export function NotebookCell({
   output,
   status = 'idle',
   type,
+  isActive,
   onCodeChange,
   onRun,
   onDelete,
@@ -47,10 +49,11 @@ export function NotebookCell({
   };
 
   return (
-    <div 
+    <div
       className={cn(
         "group relative border rounded-lg mb-4 transition-all duration-200",
-        status === 'running' ? "border-primary shadow-md ring-1 ring-primary/20" : "border-border hover:border-border/80",
+        isActive ? "ring-2 ring-primary border-primary shadow-lg scale-[1.01]" : "border-border hover:border-border/80",
+        status === 'running' && !isActive ? "border-primary shadow-md ring-1 ring-primary/20" : "",
         "bg-card"
       )}
       onMouseEnter={() => setIsHovered(true)}
@@ -83,66 +86,66 @@ export function NotebookCell({
             </div>
           )}
           {status === 'success' && (
-             <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-green-500/10 text-green-600 text-[10px] font-medium animate-in fade-in">
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-green-500/10 text-green-600 text-[10px] font-medium animate-in fade-in">
               <Check className="h-3 w-3" />
               Done
             </div>
           )}
         </div>
-        
+
         <div className="flex items-center gap-2">
-           {type === 'markdown' && !isEditing && (
-             <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setIsEditing(true)}>
-               Edit
-             </Button>
-           )}
-           <Button 
-             variant="secondary" 
-             size="sm" 
-             className={cn("h-7 gap-1.5 text-xs", status === 'running' && "opacity-50 pointer-events-none")}
-             onClick={handleRun}
-           >
-             <Play className="h-3 w-3 fill-current" />
-             {type === 'markdown' ? 'Render' : 'Run Cell'}
-           </Button>
+          {type === 'markdown' && !isEditing && (
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setIsEditing(true)}>
+              Edit
+            </Button>
+          )}
+          <Button
+            variant="secondary"
+            size="sm"
+            className={cn("h-7 gap-1.5 text-xs", status === 'running' && "opacity-50 pointer-events-none")}
+            onClick={handleRun}
+          >
+            <Play className="h-3 w-3 fill-current" />
+            {type === 'markdown' ? 'Render' : 'Run Cell'}
+          </Button>
         </div>
       </div>
 
       {/* Content Area */}
       <div className="min-h-[100px] border-b border-border/50 bg-card rounded-b-lg">
-         {type === 'markdown' && !isEditing ? (
-            <div className="p-6 prose dark:prose-invert max-w-none" onDoubleClick={() => setIsEditing(true)}>
-               <ReactMarkdown remarkPlugins={[remarkGfm]}>{code}</ReactMarkdown>
-            </div>
-         ) : (
-            <div className="py-4">
-              <Editor
-                height={Math.max(100, (code.split('\n').length * 21) + 24) + "px"}
-                value={code}
-                defaultLanguage={type === 'code' ? 'python' : 'markdown'}
-                onChange={(val) => onCodeChange(val || '')}
-                theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}
-                options={{
-                  minimap: { enabled: false },
-                  lineNumbers: 'on',
-                  folding: false,
-                  scrollBeyondLastLine: false,
-                  automaticLayout: true,
-                  padding: { top: 8, bottom: 8 },
-                  fontSize: 14,
-                  fontFamily: 'JetBrains Mono, monospace',
-                  renderLineHighlight: 'none',
-                  overviewRulerLanes: 0,
-                  hideCursorInOverviewRuler: true,
-                  scrollbar: {
-                    vertical: 'hidden',
-                    horizontal: 'hidden',
-                    alwaysConsumeMouseWheel: false
-                  },
-                }}
-              />
-            </div>
-         )}
+        {type === 'markdown' && !isEditing ? (
+          <div className="p-6 prose dark:prose-invert max-w-none" onDoubleClick={() => setIsEditing(true)}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{code}</ReactMarkdown>
+          </div>
+        ) : (
+          <div className="py-4">
+            <Editor
+              height={Math.max(100, (code.split('\n').length * 21) + 24) + "px"}
+              value={code}
+              defaultLanguage={type === 'code' ? 'python' : 'markdown'}
+              onChange={(val) => onCodeChange(val || '')}
+              theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}
+              options={{
+                minimap: { enabled: false },
+                lineNumbers: 'on',
+                folding: false,
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                padding: { top: 8, bottom: 8 },
+                fontSize: 14,
+                fontFamily: 'JetBrains Mono, monospace',
+                renderLineHighlight: 'none',
+                overviewRulerLanes: 0,
+                hideCursorInOverviewRuler: true,
+                scrollbar: {
+                  vertical: 'hidden',
+                  horizontal: 'hidden',
+                  alwaysConsumeMouseWheel: false
+                },
+              }}
+            />
+          </div>
+        )}
       </div>
 
       {/* Output Area (Code Only) */}

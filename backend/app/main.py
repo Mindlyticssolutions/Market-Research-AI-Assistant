@@ -2,6 +2,16 @@
 Market Research Multi-Agent System - FastAPI Backend
 Using Azure AI Foundry SDK
 """
+
+# Reload triggered at 2026-01-06 15:15
+import sys
+import os
+
+# Add project root to path to allow importing 'agents'
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,7 +70,8 @@ async def root():
         "message": "Market Research Multi-Agent API",
         "status": "running",
         "version": "1.0.0",
-        "docs": "/docs"
+        "docs": "/docs",
+        "agent_mode": "active_v8" # Trigger reload
     }
 
 
