@@ -2,6 +2,23 @@
 Market Research Multi-Agent System - FastAPI Backend
 Using Azure AI Foundry SDK
 """
+import sys
+from pathlib import Path
+
+# Setup paths for imports
+# Need: 
+# 1. Project Root (to find 'agents' package)
+# 2. Backend Dir (to find 'app' package)
+main_path = Path(__file__).resolve()
+app_dir = main_path.parent        # .../backend/app/
+backend_dir = app_dir.parent      # .../backend/
+project_root = backend_dir.parent # .../AI-Assistant/
+
+for path_to_add in [str(project_root), str(backend_dir)]:
+    if path_to_add not in sys.path:
+        sys.path.insert(0, path_to_add)
+        print(f"Added to sys.path: {path_to_add}")
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -68,3 +85,6 @@ async def root():
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy"}
+# force reload
+# reload 2
+# reload visibility fix

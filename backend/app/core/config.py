@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # Azure Blob Storage
     AZURE_STORAGE_CONNECTION_STRING: str = ""
     AZURE_STORAGE_CONTAINER: str = "uploads"
+    AZURE_STORAGE_SAS_TOKEN: str = ""
     
     # Azure Document Intelligence
     AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: str = ""
@@ -89,6 +90,18 @@ class Settings(BaseSettings):
             return ""
         try:
             return [p for p in self.AZURE_STORAGE_CONNECTION_STRING.split(";") if p.startswith("AccountKey=")][0].split("=")[1]
+        except (IndexError, ValueError):
+            return ""
+
+    @property
+    def azure_storage_sas_token(self) -> str:
+        """Extract SAS token from connection string if not explicitly set"""
+        if self.AZURE_STORAGE_SAS_TOKEN:
+            return self.AZURE_STORAGE_SAS_TOKEN
+        if not self.AZURE_STORAGE_CONNECTION_STRING:
+            return ""
+        try:
+            return [p for p in self.AZURE_STORAGE_CONNECTION_STRING.split(";") if p.startswith("SharedAccessSignature=")][0].split("=")[1]
         except (IndexError, ValueError):
             return ""
 

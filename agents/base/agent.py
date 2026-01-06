@@ -9,8 +9,8 @@ from dataclasses import dataclass
 import sys
 import os
 
-# Add backend to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
+# Note: sys.path is set up by app.main on startup
+from app.core.shared_state import shared_state
 
 
 @dataclass
@@ -52,8 +52,16 @@ class BaseAgent(ABC):
         try:
             from app.core.azure_client import get_ai_client
             return get_ai_client()
-        except ImportError:
-            print(f"Warning: Could not import Azure client for {self.name}")
+        except ImportError as e:
+            err_msg = f"Warning: Could not import Azure client for {self.name}: {e}\n"
+            try:
+                import traceback
+                err_msg += traceback.format_exc()
+                with open("C:/Users/WELCOME/.gemini/antigravity/brain/344a2003-6407-4384-a872-02ca18f46655/import_error.log", "a", encoding="utf-8") as f:
+                    f.write(err_msg + "\n" + "="*50 + "\n")
+            except:
+                pass
+            print(err_msg)
             return None
     
     @property
@@ -118,38 +126,123 @@ DATA ACCESS POLICY:
             
             # 1. Direct RAG Access (Metadata Only)
             rag = RAGRetriever()
-            rag_docs = await rag.retrieve(query)
+            # Increase top_k to get more chunks for better coverage
+            rag_docs = await rag.retrieve(query, top_k=20)
             
+            unique_docs = []
             if rag_docs:
-                context["rag_results"] = rag_docs
-                context["sources_used"].append("Azure AI Search (Direct Metadata)")
+                # SESSION CATEGORIZATION: Distinguish between active session and persistent database
+                active_files = shared_state.list_files()
+                active_file_ids = {f.id for f in active_files}
+                
+                active_rag_docs = []
+                historical_rag_docs = []
+                seen_titles = set()
+                
+                for doc in rag_docs:
+                    f_id = doc.get("file_id") or doc.get("metadata", {}).get("file_id")
+                    title = doc.get("title", "Unknown")
+                    
+                    if title in seen_titles:
+                        continue
+                    seen_titles.add(title)
+                    
+                    if f_id in active_file_ids:
+                        active_rag_docs.append(doc)
+                    else:
+                        historical_rag_docs.append(doc)
+                
+                context["active_rag_results"] = active_rag_docs
+                context["historical_rag_results"] = historical_rag_docs
+                context["rag_results"] = active_rag_docs + historical_rag_docs
+                context["sources_used"].append("Azure AI Search (Categorized)")
+                
+                # For backward compatibility and simplified prompt building
+                unique_docs = context["rag_results"]
                 
             # 2. Direct KAG Access (Graph Structure Only)
             kag = KAGRetriever()
             kag_entities = await kag.retrieve(query)
             
             if kag_entities:
-                context["kag_results"] = kag_entities
+                # Deduplicate entities too
+                seen_entities = set()
+                unique_entities = []
+                for ent in kag_entities:
+                    name = ent.get("name", "Unknown")
+                    if name not in seen_entities:
+                        unique_entities.append(ent)
+                        seen_entities.add(name)
+                context["kag_results"] = unique_entities
                 context["sources_used"].append("Cosmos DB Gremlin (Direct Graph)")
             
             # Build context text from results
-            context_parts = ["=== AVAILABLE METADATA (Direct Access) ==="]
+            context_parts = ["=== DATA SOURCES & METADATA ==="]
             
-            if rag_docs:
-                context_parts.append("\n📁 Documents (Metadata):")
-                for doc in rag_docs[:5]:
-                    title = doc.get('title', 'Unknown')
-                    fname = doc.get('metadata_storage_name', 'Unknown File')
-                    context_parts.append(f"  - [Doc] {title} ({fname})")
+            # 1. ANALYZE INTENT (Conditional Filtering)
+            query_lower = query.lower()
+            
+            # Get historical docs first so we can reference it
+            hist_docs = context.get("historical_rag_results", [])
+            
+            # Keywords implying "Database / All History"
+            db_keywords = ["database", "all metadata", "storage", "everything", "all files", "meta", "history", "archive", "repository", "azure"]
+            is_database_query = any(w in query_lower for w in db_keywords)
+            
+            # Keywords implying "Current Session / Web UI"
+            session_keywords = ["current", "session", "uploaded", "this time", "files uploaded", "web page", "webpage", "on the screen", "visible", "ui"]
+            is_session_query = any(w in query_lower for w in session_keywords)
+            
+            # LOGIC:
+            # If user asks for "current/session" AND NOT "database", we hide historical data.
+            # If user asks for "uploaded metadata", that's ambiguous, but "metadata" triggers database query, so show all.
+            # If user asks for "uploaded files in web page", triggers session filter.
+            
+            show_historical = True
+            if is_session_query and not is_database_query:
+                show_historical = False
+                print(f"[Agent Filter] HARD GATE ACTIVE. User asked for session/web files. Hiding {len(hist_docs)} historical docs.")
+                
+                # CRITICAL: Purge the raw data structures too, so agents accessing 'rag_results' directly effectively see nothing.
+                context["historical_rag_results"] = [] 
+                context["rag_results"] = context["active_rag_results"] # ONLY active files remain
+                hist_docs = [] # Local variable update for the text builder below
+                
 
-            if kag_entities:
-                context_parts.append("\n🔗 Knowledge Graph (Structure):")
-                for entity in kag_entities[:5]:
+            # 2. INJECT ACTIVE SESSION FILES (Source of Truth for "Currently Uploaded")
+            all_files = shared_state.list_files()
+            if all_files:
+                context_parts.append("\n📁 ACTIVE SESSION FILES (Source of Truth for 'Currently Uploaded'):")
+                for f in all_files:
+                    context_parts.append(f"  - [Session] {f.filename} (Status: {f.status})")
+            else:
+                context_parts.append("\n⚠️ NO FILES UPLOADED IN CURRENT SESSION.")
+
+            # 3. INJECT PERSISTENT KNOWLEDGE BASE (Condensed)
+            # Only show if show_historical is True (which corresponds to hist_docs being not empty now)
+            if hist_docs:
+                context_parts.append("\n💾 PERSISTENT KNOWLEDGE BASE (Historical Metadata in Database):")
+                for doc in hist_docs[:15]:
+                    title = doc.get('title', 'Unknown')
+                    context_parts.append(f"  - [Database] {title}")
+            elif not show_historical:
+                 context_parts.append("\n👻 [Historical files hidden to prevent hallucinations on current session query]")
+
+            # 4. KNOWLEDGE GRAPH
+            if unique_entities:
+                context_parts.append("\n🔗 KNOWLEDGE GRAPH ENTITIES:")
+                for entity in unique_entities[:10]:
                     name = entity.get('name', 'Unknown')
                     label = entity.get('label', 'Entity')
                     context_parts.append(f"  - [Graph] {label}: {name}")
             
-            if not rag_docs and not kag_entities:
+            context_parts.append("\n--- USAGE INSTRUCTIONS ---")
+            context_parts.append("- If results contain both [Session] and [Database] files, distinguish them clearly.")
+            context_parts.append("- If user asks about 'Current/Uploaded' items, you MUST refer to [Session] markers.")
+            context_parts.append("- If user asks for 'Database/All' items, include [Database] markers.")
+            context_parts.append("- If no [Session] files are present, state that clearly before mentioning database history.")
+            
+            if not rag_docs and not kag_entities and not all_files:
                 context_parts.append("No relevant metadata found.")
                 
             context["context_text"] = "\n".join(context_parts)

@@ -12,6 +12,7 @@ import asyncio
 
 from azure.storage.blob import BlobServiceClient
 from app.core.config import settings
+from app.core.shared_state import shared_state, FileInfo
 
 router = APIRouter()
 
@@ -24,18 +25,6 @@ router = APIRouter()
 TEXT_EXTENSIONS = {"txt", "md", "rst", "csv", "json", "xml", "yaml", "yml", "html", "htm"}
 
 
-class FileInfo(BaseModel):
-    """File information model"""
-    id: str
-    filename: str
-    file_type: str
-    size: int
-    uploaded_at: datetime
-    status: str  # pending, processing, indexed, failed
-    blob_url: Optional[str] = None
-    chunks_indexed: Optional[int] = None
-
-
 class UploadResponse(BaseModel):
     """Upload response model"""
     message: str
@@ -43,10 +32,6 @@ class UploadResponse(BaseModel):
     filename: str
     status: str
     blob_url: Optional[str] = None
-
-
-# In-memory storage for demo (replace with database in production)
-files_store: dict[str, FileInfo] = {}
 
 
 
@@ -129,8 +114,9 @@ async def _process_and_index_file(file_id: str, content: bytes, ext: str, filena
     """Background task to process and index file into RAG"""
     try:
         # Update status to processing
-        if file_id in files_store:
-            files_store[file_id].status = "processing"
+        file_info = shared_state.get_file(file_id)
+        if file_info:
+            file_info.status = "processing"
         
         # Extract text content
         text_content = await _extract_text_content(content, ext)
@@ -167,34 +153,39 @@ async def _process_and_index_file(file_id: str, content: bytes, ext: str, filena
             )
             
             if result.get("success"):
-                if file_id in files_store:
-                    files_store[file_id].status = "indexed"
-                    files_store[file_id].chunks_indexed = result.get("chunks_indexed", 0)
+                file_info = shared_state.get_file(file_id)
+                if file_info:
+                    file_info.status = "indexed"
+                    file_info.chunks_indexed = result.get("chunks_indexed", 0)
             else:
-                if file_id in files_store:
-                    files_store[file_id].status = "failed"
+                file_info = shared_state.get_file(file_id)
+                if file_info:
+                    file_info.status = "failed"
                     
         except Exception as e:
             print(f"Indexing error: {e}")
-            if file_id in files_store:
-                files_store[file_id].status = "failed"
+            file_info = shared_state.get_file(file_id)
+            if file_info:
+                file_info.status = "failed"
                 
     except Exception as e:
         print(f"Processing error: {e}")
-        if file_id in files_store:
-            files_store[file_id].status = "failed"
+        file_info = shared_state.get_file(file_id)
+        if file_info:
+            file_info.status = "failed"
 
 
 @router.post("/upload", response_model=UploadResponse)
 async def upload_file(
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...)
 ):
     """
-    Upload file to Azure Blob Storage and Index to RAG
+    Upload file to Azure Blob Storage and Index to RAG (SYNCHRONOUS)
     1. Uploads to Blob Storage (uploads container)
     2. Extracts text
     3. Indexes to Azure AI Search (Vector DB)
+    
+    Returns only after indexing is complete so file is immediately queryable.
     """
     # Validate file extension - OK, allowing all
     ext = file.filename.split(".")[-1].lower() if "." in file.filename else ""
@@ -217,50 +208,64 @@ async def upload_file(
         file_type=ext,
         size=size,
         uploaded_at=datetime.utcnow(),
-        status="pending",
+        status="processing",  # Start as processing
         blob_url=blob_url
     )
     
     # Store file info
-    files_store[file_id] = file_info
+    shared_state.add_file(file_id, file_info)
     
-    # Add background task for processing and indexing
-    background_tasks.add_task(
-        _process_and_index_file,
-        file_id,
-        content,
-        ext,
-        file.filename,
-        blob_url
-    )
-    
-    return UploadResponse(
-        message="File uploaded to Blob Storage, indexing started",
-        file_id=file_id,
-        filename=file.filename,
-        status="pending",
-        blob_url=blob_url
-    )
+    # SYNCHRONOUS PROCESSING - Wait for indexing to complete
+    try:
+        await _process_and_index_file(
+            file_id,
+            content,
+            ext,
+            file.filename,
+            blob_url
+        )
+        
+        # Get updated status
+        current_info = shared_state.get_file(file_id)
+        final_status = current_info.status
+        chunks_indexed = current_info.chunks_indexed
+        
+        return UploadResponse(
+            message=f"File uploaded and indexed successfully ({chunks_indexed} chunks)",
+            file_id=file_id,
+            filename=file.filename,
+            status=final_status,
+            blob_url=blob_url
+        )
+    except Exception as e:
+        current_info = shared_state.get_file(file_id)
+        if current_info:
+            current_info.status = "failed"
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upload succeeded but indexing failed: {str(e)}"
+        )
 
 
 @router.get("/list", response_model=List[FileInfo])
 async def list_files():
     """List all uploaded files"""
-    return list(files_store.values())
+    return shared_state.list_files()
 
 
 @router.get("/{file_id}", response_model=FileInfo)
 async def get_file(file_id: str):
     """Get file information by ID"""
-    if file_id not in files_store:
+    file_info = shared_state.get_file(file_id)
+    if not file_info:
         raise HTTPException(status_code=404, detail="File not found")
-    return files_store[file_id]
+    return file_info
 
 
 @router.delete("/{file_id}")
 async def delete_file(file_id: str):
     """Delete a file and remove from RAG index"""
-    if file_id not in files_store:
+    if not shared_state.get_file(file_id):
         raise HTTPException(status_code=404, detail="File not found")
     
     # Remove from RAG index
@@ -271,17 +276,17 @@ async def delete_file(file_id: str):
     except Exception as e:
         print(f"Error removing from RAG: {e}")
     
-    del files_store[file_id]
+    shared_state.remove_file(file_id)
     return {"message": "File deleted successfully", "file_id": file_id}
 
 
 @router.get("/{file_id}/status")
 async def get_file_status(file_id: str):
     """Get file processing status"""
-    if file_id not in files_store:
+    file_info = shared_state.get_file(file_id)
+    if not file_info:
         raise HTTPException(status_code=404, detail="File not found")
     
-    file_info = files_store[file_id]
     return {
         "file_id": file_id,
         "filename": file_info.filename,
@@ -290,3 +295,5 @@ async def get_file_status(file_id: str):
         "blob_url": file_info.blob_url,
         "message": f"File is {file_info.status}"
     }
+
+# Force reload

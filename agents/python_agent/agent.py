@@ -38,9 +38,12 @@ Available libraries:
 
 DATA ACCESS RESTRICTIONS:
 - You CANNOT read files directly from disk (e.g., no `open()`, no absolute paths)
-- You SHOULD generate code that assumes data is loaded into pandas DataFrames based on filenames
-  - Example: For "sales.csv", assume a dataframe `df_sales` exists or write code to load it: `df_sales = pd.read_csv('sales.csv')`
-- EXPLAIN that this code is for the user to run, or for a secure execution environment (if available)
+- For Databricks, DO NOT use `/dbfs/mnt/` (mounting is disabled).
+- Instead, use Spark to read directly from Azure Storage (WASBS):
+  - Example: `df = spark.read.option("header", "true").csv("wasbs://container@account.blob.core.windows.net/path/to/file.csv")`
+  - Convert to pandas for analysis: `pdf = df.toPandas()`
+- The context provided contains the File Path. Ensure you construct the WASBS URL correctly using the account name 'straccai' and container 'mrfileuploads'.
+- EXPLAIN that this code uses Spark's direct connection for security.
 - ONLY use the metadata (columns, types) provided to ensure your code uses correct field names
 - If no columns are known, infer generic ones and comment them
 

@@ -67,9 +67,11 @@ class RAGRetriever:
                 metadata = doc.metadata or {}
                 
                 results.append({
-                    "content": "[METADATA ONLY]", # STRICT SECURITY POLICY
+                    "content": doc.page_content, # Content allowed
                     "title": metadata.get("title", "Unknown"),
                     "source": metadata.get("source", ""),
+                    "file_id": metadata.get("file_id", ""),
+                    "file_name": metadata.get("file_name", metadata.get("title", "Unknown")),
                     "chunk_id": metadata.get("chunk_id", ""),
                     "score": 1.0 # LangChain similarity_search doesn't always return score unless using search_with_score
                 })

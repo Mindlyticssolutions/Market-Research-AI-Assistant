@@ -43,3 +43,19 @@ async def azure_health():
         status["document_intelligence"] = "configured"
     
     return status
+
+
+@router.get("/debug")
+async def debug_shared_state():
+    """Debug helper for memory/singleton issues"""
+    import sys
+    from app.core.shared_state import shared_state
+    import app.core.shared_state as module_ref
+    
+    return {
+        "instance_id": id(shared_state),
+        "file_count": len(shared_state.files),
+        "files": [f.filename for f in shared_state.list_files()],
+        "module_file": module_ref.__file__,
+        "path": sys.path[:3]
+    }

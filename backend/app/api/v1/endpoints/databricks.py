@@ -113,6 +113,47 @@ async def stop_cluster(cluster_id: str):
 EXECUTION_CONTEXTS: Dict[str, str] = {}
 
 
+async def _configure_storage(client: httpx.AsyncClient, cluster_id: str, context_id: str):
+    """
+    Internal helper to bootstrap the Spark session with SAS token credentials.
+    This runs silently at the start of every new execution context.
+    """
+    settings_obj = settings
+    sas_token = settings_obj.azure_storage_sas_token
+    
+    # CLEANING: Remove leading '?'
+    if sas_token and sas_token.startswith("?"):
+        sas_token = sas_token[1:]
+        
+    if not sas_token:
+        print(f"[Databricks] WARN: No SAS token found. Skipping bootstrap.")
+        return
+
+    # Construct the config script
+    # We use a silent try/except to avoid crashing the user's actual command if config fails
+    script = f"""
+try:
+    spark.conf.set(
+        "fs.azure.sas.{settings_obj.AZURE_STORAGE_CONTAINER}.{settings_obj.azure_storage_account_name}.blob.core.windows.net",
+        "{sas_token}"
+    )
+    print("[Bootstrap] Azure Storage access configured successfully.")
+except Exception as e:
+    print(f"[Bootstrap] Warning: Failed to configure storage: {{e}}")
+"""
+    
+    try:
+        print(f"[Databricks] Bootstrapping storage for context {context_id}...")
+        await client.post("/api/1.2/commands/execute", json={
+            "language": "python",
+            "clusterId": cluster_id,
+            "contextId": context_id,
+            "command": script
+        })
+    except Exception as e:
+        print(f"[Databricks] Bootstrap error: {str(e)}")
+
+
 @router.post("/execute", response_model=ExecutionResult)
 async def execute_code(request: ExecuteRequest):
     """Execute code on Databricks cluster using stored Execution Context"""
@@ -135,9 +176,19 @@ async def execute_code(request: ExecuteRequest):
                 "clusterId": request.cluster_id
             })
             if ctx_resp.status_code != 200:
-                raise HTTPException(status_code=ctx_resp.status_code, detail="Failed to create execution context")
+                error_detail = ctx_resp.text
+                try:
+                    error_json = ctx_resp.json()
+                    error_detail = error_json.get("message", error_detail)
+                except:
+                    pass
+                raise HTTPException(status_code=ctx_resp.status_code, detail=f"Failed to create execution context: {error_detail}")
             context_id = ctx_resp.json()["id"]
             EXECUTION_CONTEXTS[request.cluster_id] = context_id
+            
+            # BOOTSTRAP: Configure storage immediately
+            if request.language == "python":
+                await _configure_storage(client, request.cluster_id, context_id)
 
         # Execute command
         cmd_resp = await client.post("/api/1.2/commands/execute", json={
@@ -157,6 +208,11 @@ async def execute_code(request: ExecuteRequest):
             if ctx_resp.status_code == 200:
                  context_id = ctx_resp.json()["id"]
                  EXECUTION_CONTEXTS[request.cluster_id] = context_id
+                 
+                 # BOOTSTRAP: Configure storage for the new context
+                 if request.language == "python":
+                    await _configure_storage(client, request.cluster_id, context_id)
+                 
                  # Retry execution
                  cmd_resp = await client.post("/api/1.2/commands/execute", json={
                     "language": request.language,
@@ -220,48 +276,63 @@ async def mount_storage(cluster_id: str):
     if cluster_id.startswith("mock-"):
         return {"message": "Mock storage mounted", "mount_point": "/mnt/mock-uploads"}
 
-    settings_obj = settings # Local reference to avoid confusion
-    if not settings_obj.azure_storage_account_name or not settings_obj.azure_storage_account_key:
-         raise HTTPException(status_code=400, detail="Azure Storage credentials not configured")
+    settings_obj = settings
+    sas_token = settings_obj.azure_storage_sas_token
+    
+    # CLEANING: Remove leading '?' if the user pasted it from Azure
+    if sas_token and sas_token.startswith("?"):
+        sas_token = sas_token[1:]
+    
+    account_name = settings_obj.azure_storage_account_name
+    account_key = settings_obj.azure_storage_account_key
+    conn_string = settings_obj.AZURE_STORAGE_CONNECTION_STRING
+    
+    # Debug info to terminal
+    print(f"[Databricks] Attempting mount for cluster {cluster_id}")
+    print(f"[Databricks] SAS Token (from variable or conn string): {'YES' if sas_token else 'NO'}")
+    print(f"[Databricks] Account Key (from conn string): {'YES' if account_key else 'NO'}")
+    print(f"[Databricks] Account Name: '{account_name}'")
+    
+    if conn_string:
+        keys = [p.split("=")[0] for p in conn_string.split(";") if "=" in p]
+        print(f"[Databricks] Connection String Parts found: {keys}")
+    else:
+        print(f"[Databricks] No Connection String found in settings.")
 
     mount_script = f"""
 container_name = "{settings_obj.AZURE_STORAGE_CONTAINER}"
 storage_account_name = "{settings_obj.azure_storage_account_name}"
-storage_account_key = "{settings_obj.azure_storage_account_key}"
-mount_point = f"/mnt/{{container_name}}"
+sas_token = "{sas_token}"
 
 try:
-    # Check if already mounted
-    if not any(mount.mountPoint == mount_point for mount in dbutils.fs.mounts()):
-        print(f"Mounting {{container_name}} to {{mount_point}}...")
-        dbutils.fs.mount(
-            source = f"wasbs://{{container_name}}@{{storage_account_name}}.blob.core.windows.net",
-            mount_point = mount_point,
-            extra_configs = {{
-                f"fs.azure.account.key.{{storage_account_name}}.blob.core.windows.net": storage_account_key
-            }}
-        )
-        print(f"Successfully mounted at {{mount_point}}")
-    else:
-        print(f"Already mounted at {{mount_point}}")
-        
-    # List files to verify
-    files = dbutils.fs.ls(mount_point)
-    print(f"Verified access. Found {{len(files)}} files.")
+    print(f"Configuring direct access for {{container_name}}...")
+    # Configure Spark to access Azure Blob Storage directly using SAS token
+    # This bypasses the need for mounting (which is often blocked)
+    spark.conf.set(
+        f"fs.azure.sas.{{container_name}}.{{storage_account_name}}.blob.core.windows.net",
+        sas_token
+    )
+    print(f"Successfully configured Spark access for WASBS.")
+    
+    # Verify access by listing files
+    path = f"wasbs://{{container_name}}@{{storage_account_name}}.blob.core.windows.net/"
+    print(f"Verifying access to {{path}}...")
+    dbutils.fs.ls(path)
+    print("Access verification successful.")
     
 except Exception as e:
-    print(f"Error mounting storage: {{str(e)}}")
+    print(f"Error configuring storage access: {{str(e)}}")
 """
     
-    # Execute the mount script
+    # Execute the config script
     try:
         req = ExecuteRequest(cluster_id=cluster_id, code=mount_script, language="python")
         result = await execute_code(req)
         
         if result.status == "error":
-            raise HTTPException(status_code=500, detail=f"Mount failed: {result.error}")
+            raise HTTPException(status_code=500, detail=f"Configuration failed: {result.error}")
             
-        return {"message": "Storage mount command executed", "output": result.output}
+        return {"message": "Storage access configured (Direct Read)", "output": result.output}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -297,3 +368,7 @@ async def stream_execution(websocket: WebSocket, session_id: str):
         
     except WebSocketDisconnect:
         pass
+
+
+
+    

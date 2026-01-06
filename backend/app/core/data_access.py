@@ -192,7 +192,8 @@ class DataAccessLayer:
                         metadata={
                             "title": result.get("title", "Unknown"),
                             "source": result.get("source", ""),
-                            "chunk_id": result.get("chunk_id", "")
+                            "chunk_id": result.get("chunk_id", ""),
+                            "file_id": result.get("file_id", "")
                         },
                         score=result.get("score", 0.0)
                     ))
