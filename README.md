@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Analytix - AI-Powered Data Analysis Platform
 
 An intelligent data analysis platform that combines RAG/KAG retrieval with agentic code execution in a Databricks sandbox environment. The platform enables natural language interactions for data exploration, analysis, and visualization.
@@ -1127,3 +1128,6 @@ Developed by Mindlytics Solutions
 ## 📞 Support
 
 For issues or questions, please open a GitHub issue or contact the development team.
+=======
+# Market-Research-AI-Assistant
+>>>>>>> 4e3935100e55315330ed95b551f19d0a1502bcfb
