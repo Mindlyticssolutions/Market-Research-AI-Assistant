@@ -23,7 +23,7 @@ interface NotebookCellProps {
 }
 
 export function NotebookCell({
-  code,
+  code = '',
   output,
   status = 'idle',
   type,
@@ -37,6 +37,9 @@ export function NotebookCell({
   const { resolvedTheme } = useTheme();
   const [isHovered, setIsHovered] = useState(false);
   const [isEditing, setIsEditing] = useState(true); // For markdown toggle
+
+  // Ensure code is always a string
+  const safeCode = code || '';
 
   // Auto-switch to preview for markdown if successful run
   const showPreview = type === 'markdown' && status === 'success' && !isEditing;
@@ -115,13 +118,13 @@ export function NotebookCell({
       <div className="min-h-[100px] border-b border-border/50 bg-card rounded-b-lg">
         {type === 'markdown' && !isEditing ? (
           <div className="p-6 prose dark:prose-invert max-w-none" onDoubleClick={() => setIsEditing(true)}>
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{code}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{safeCode}</ReactMarkdown>
           </div>
         ) : (
           <div className="py-4">
             <Editor
-              height={Math.max(100, (code.split('\n').length * 21) + 24) + "px"}
-              value={code}
+              height={Math.max(100, (safeCode.split('\n').length * 21) + 24) + "px"}
+              value={safeCode}
               defaultLanguage={type === 'code' ? 'python' : 'markdown'}
               onChange={(val) => onCodeChange(val || '')}
               theme={resolvedTheme === 'dark' ? 'vs-dark' : 'light'}

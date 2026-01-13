@@ -18,35 +18,21 @@ class PythonAgent(BaseAgent):
             name="Python Agent",
             description="Generates Python code for data analysis and visualization"
         )
+        self._current_query = ""
     
     def _get_system_prompt(self) -> str:
-        return """You are a senior Data Scientist and Python expert. Your goal is to provide deep insights through data analysis and visualization.
+        return """You are a senior Data Scientist and Python Expert. Your job is to provide Python expertise by either SHOWING code as text or EXECUTING it in a sandbox.
 
-IMPORTANT: You work ONLY with data provided in your context from uploaded documents (RAG) and knowledge graph (KAG).
-
-Your core responsibilities:
-1. Generate high-quality Python code for data analysis.
-2. ALWAYS execute your code using the `execute_databricks_code` tool to verify results and generate visualizations.
-3. CREATE STUNNING VISUALIZATIONS using matplotlib and seaborn.
-4. Process data from the context (files like 'sales.csv' are in the current directory).
-
-Available libraries:
-- pandas (as pd), numpy (as np)
-- matplotlib.pyplot (as plt), seaborn (as sns)
-
-CODING STANDARDS:
-- Always `import pandas as pd`, `import matplotlib.pyplot as plt`, and `import seaborn as sns` for visualization tasks.
-- Use `plt.show()` at the end of your visualization code.
-- Ensure your code is complete and executable.
-
-Output Format:
-1. Analysis/Explanation of the data.
-2. Call the `execute_databricks_code` tool to run the code.
-3. Summarize the results based on the tool's output.
-
-At the bottom, provide 2-3 short "Suggestions:" for follow-up analysis.
-
-If you generate a visualization, mention that the user can click "View Insights" in the code block footer to see a detailed report."""
+CRITICAL RULES:
+CRITICAL RULES:
+0. Start your thought process with an extremely concise, business-friendly summary (1-3 words) in brackets, e.g., `[Task: Fibonacci]`. 
+   - **IMPORTANT**: ONLY output `[Task: ...]` if you intend to EXECUTE code (Mode: Execution).
+   - If `Mode: Text Only`, DO NOT output `[Task: ...]`.
+   Directly below (if applicable), specify the MODE, e.g., `Mode: Text Only` or `Mode: Execution`. 
+1. If the query starts with "TEXT ONLY:" or you identify a request to "write", "show", or "provide" code -> You MUST output code in a standard markdown block and NOT call the tool.
+2. If the query starts with "EXECUTE:" or you identify a request to "run", "calculate", "analyze", or "execute" -> You MUST call the `execute_databricks_code` tool.
+3. Available libraries: pandas, numpy, matplotlib, seaborn.
+4. After tool execution, summarize the results based on the tool's output."""
     
     def _get_tools(self) -> List[Dict]:
         return [
@@ -60,8 +46,32 @@ If you generate a visualization, mention that the user can click "View Insights"
             }
         ]
     
+    def _get_tool_choice(self) -> str:
+        """Dynamically mask tool usage if the intent is strictly 'write/show'."""
+        q = self._current_query.upper()
+        
+        # 1. Absolute Overrides based on Orchestrator Prefix
+        if "TEXT ONLY:" in q:
+            print(f"DEBUG: [Python Agent] Strict Prefix detected: TEXT ONLY. Disabling tools.")
+            return "none"
+        if "EXECUTE:" in q:
+            print(f"DEBUG: [Python Agent] Strict Prefix detected: EXECUTION. Enabling tools.")
+            return "auto"
+            
+        # 2. Keyword Fallback
+        q_lower = q.lower()
+        write_keywords = ["write", "show", "provide", "example", "how to", "just the code", "code for", "script for"]
+        run_keywords = ["run", "calculate", "analyze", "execute", "plot", "visualize", "determine", "process"]
+        
+        # If it looks like a request to SEE code and NOT run it
+        if any(k in q_lower for k in write_keywords) and not any(k in q_lower for k in run_keywords):
+            return "none"
+            
+        return "auto"
+    
     async def execute(self, query: str, context: Dict = None, callback=None) -> AgentResponse:
         """Execute Python agent logic via ReAct loop"""
+        self._current_query = query # Track for tool choice logic
         # Add data context if available
         enhanced_query = query
         if context and "data_summary" in context:

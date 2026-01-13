@@ -97,12 +97,13 @@ async def _execute_agent(
         # Execute with RAG/KAG context (handled internally by BaseAgent)
         result = await agent.execute(query, full_context, callback=callback)
         
-        print(f"DEBUG: Agent {agent_name} execution complete. Success: {result.success}")
+        print(f"DEBUG: Agent {agent_name} execution complete. Success: {result.success}", flush=True)
         if result.success:
-            print(f"DEBUG: Returning content (len {len(result.content or '')}): {result.content[:100]}...")
+            content_preview = result.content[:100] if result.content else "None"
+            print(f"DEBUG: Returning content (len {len(result.content or '')}): {content_preview}...", flush=True)
             return result.content, result.sources or [], result.plot
         else:
-            print(f"DEBUG: Returning error: {result.error}")
+            print(f"DEBUG: Returning error: {result.error}", flush=True)
             return f"Agent error: {result.error}", [], None
             
     except Exception as e:

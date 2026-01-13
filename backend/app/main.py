@@ -3,7 +3,7 @@ Market Research Multi-Agent System - FastAPI Backend
 Using Azure AI Foundry SDK
 """
 
-# Reload triggered at 2026-01-06 15:15
+# Reload triggered at 2026-01-07 12:46
 import sys
 import os
 
@@ -71,7 +71,7 @@ async def root():
         "status": "running",
         "version": "1.0.0",
         "docs": "/docs",
-        "agent_mode": "active_v8" # Trigger reload
+        "agent_mode": "active_v10" # Trigger reload
     }
 
 

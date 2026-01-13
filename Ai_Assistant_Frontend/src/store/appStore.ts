@@ -19,13 +19,14 @@ export interface QueryArtifact {
 export interface Query {
   id: string;
   number: number;
+  title: string;
   prompt: string;
   code: string;
   output: string;
   artifacts: QueryArtifact[];
   createdAt: Date;
   updatedAt: Date;
-  status?: 'idle' | 'running' | 'success' | 'error';
+  status?: 'idle' | 'generating' | 'running' | 'success' | 'error';
   type?: 'code' | 'markdown';
 }
 
@@ -39,6 +40,7 @@ export interface AIMessage {
   executionLogs?: string[];
   timestamp: Date;
   isThinking?: boolean;
+  wasAutoSynced?: boolean;
 }
 
 interface AppState {
@@ -48,10 +50,9 @@ interface AppState {
   addDataSource: (source: Omit<DataSource, 'id' | 'connectedAt'>) => void;
   removeDataSource: (id: string) => void;
 
-  // Queries
   queries: Query[];
   activeQueryId: string | null;
-  addQuery: (prompt: string, code: string) => Query;
+  addQuery: (title: string, prompt: string, code: string) => Query;
   updateQuery: (id: string, updates: Partial<Query>) => void;
   removeQuery: (id: string) => void;
   setActiveQuery: (id: string | null) => void;
@@ -118,6 +119,7 @@ export const useAppStore = create<AppState>()(
         {
           id: 'demo-query-1',
           number: 1,
+          title: 'Sales Exploration',
           prompt: 'Load and explore the sales dataset',
           code: `import pandas as pd
 import numpy as np
@@ -139,6 +141,7 @@ df.head()`,
         {
           id: 'demo-query-2',
           number: 2,
+          title: 'Sales Trend Viz',
           prompt: 'Create a sales trend visualization',
           code: `import matplotlib.pyplot as plt
 import seaborn as sns
@@ -174,7 +177,8 @@ plt.show()`,
         {
           id: 'demo-query-3',
           number: 3,
-          prompt: 'Train a sales prediction model',
+          title: 'Success Prediction',
+          prompt: 'Predict the success of each sale',
           code: `from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
@@ -219,10 +223,11 @@ for feat, imp in zip(X.columns, model.feature_importances_):
       ],
       activeQueryId: 'demo-query-1',
 
-      addQuery: (prompt, code) => {
+      addQuery: (title, prompt, code) => {
         const newQuery: Query = {
           id: crypto.randomUUID(),
           number: get().queries.length + 1,
+          title,
           prompt,
           code,
           output: '',

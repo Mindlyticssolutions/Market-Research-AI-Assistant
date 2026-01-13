@@ -17,22 +17,30 @@ class RAGRetriever:
         self.endpoint = settings.AZURE_SEARCH_ENDPOINT
         self.key = settings.AZURE_SEARCH_KEY
         self.index_name = settings.AZURE_SEARCH_INDEX_NAME
+        self.embeddings = None
+        self.vector_store = None
+        self._initialized = False
         
-        # Initialize Embeddings
-        self.embeddings = AzureOpenAIEmbeddings(
-            azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
-            api_key=settings.AZURE_OPENAI_API_KEY,
-            azure_deployment=settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
-            openai_api_version=settings.AZURE_OPENAI_API_VERSION,
-        )
-        
-        # Initialize Vector Store
-        self.vector_store = AzureSearch(
-            azure_search_endpoint=self.endpoint,
-            azure_search_key=self.key,
-            index_name=self.index_name,
-            embedding_function=self.embeddings
-        )
+        try:
+            # Initialize Embeddings
+            self.embeddings = AzureOpenAIEmbeddings(
+                azure_endpoint=settings.AZURE_OPENAI_ENDPOINT,
+                api_key=settings.AZURE_OPENAI_API_KEY,
+                azure_deployment=settings.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+                openai_api_version=settings.AZURE_OPENAI_API_VERSION,
+            )
+            
+            # Initialize Vector Store
+            self.vector_store = AzureSearch(
+                azure_search_endpoint=self.endpoint,
+                azure_search_key=self.key,
+                index_name=self.index_name,
+                embedding_function=self.embeddings
+            )
+            self._initialized = True
+        except Exception as e:
+            print(f"DEBUG: [RAGRetriever] Initialization error: {e}")
+            self._initialized = False
     
     @property
     def client(self):
@@ -47,16 +55,31 @@ class RAGRetriever:
     ) -> List[Dict[str, Any]]:
         """Retrieve relevant documents asynchronously using LangChain"""
         
+        if not self._initialized or not self.vector_store:
+            print("DEBUG: [RAGRetriever] Not initialized, returning empty results")
+            return []
+        
         try:
             # Define search wrapper
             def _run_search():
-                # Perform similarity search
-                # LangChain returns List[Document]
-                docs = self.vector_store.similarity_search(query, k=top_k)
-                return docs
+                print(f"DEBUG: [RAGRetriever] Starting internal similarity_search for query: {query[:50]}...")
+                try:
+                    # Perform similarity search
+                    # LangChain returns List[Document]
+                    docs = self.vector_store.similarity_search(query, k=top_k)
+                    print(f"DEBUG: [RAGRetriever] similarity_search complete. Returned {len(docs) if docs else 0} docs.")
+                    return docs if docs else []
+                except Exception as search_err:
+                    print(f"DEBUG: [RAGRetriever] similarity_search error: {search_err}")
+                    return []
             
+            print(f"DEBUG: [RAGRetriever] Running search in executor...")
             loop = asyncio.get_event_loop()
             docs = await loop.run_in_executor(None, _run_search)
+            print(f"DEBUG: [RAGRetriever] Executor returned.")
+            
+            if not docs:
+                return []
             
             # Format results and ENFORCE METADATA ONLY
             results = []

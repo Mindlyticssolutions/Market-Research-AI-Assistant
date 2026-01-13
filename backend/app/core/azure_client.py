@@ -110,11 +110,13 @@ class AzureAIFoundryClient:
                     formatted_messages.append(msg)
                 elif hasattr(msg, 'role') and hasattr(msg, 'content'):
                     # Pydantic models or OpenAI message objects
-                    formatted_messages.append({
+                    d = {
                         "role": msg.role,
                         "content": msg.content,
-                        "tool_calls": getattr(msg, 'tool_calls', None)
-                    })
+                    }
+                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        d["tool_calls"] = msg.tool_calls
+                    formatted_messages.append(d)
                 elif hasattr(msg, 'content'):
                     # Fallback for simpler message objects
                     msg_type = type(msg).__name__.lower()
@@ -134,7 +136,7 @@ class AzureAIFoundryClient:
             tools = kwargs.get('tools')
             formatted_tools = self._format_tools(tools) if tools else None
 
-            print(f"DEBUG: [AzureClient] Sending {len(formatted_messages)} messages with {len(formatted_tools) if formatted_tools else 0} tools")
+            print(f"DEBUG: [AzureClient] Sending {len(formatted_messages)} messages with {len(formatted_tools) if formatted_tools else 0} tools, tool_choice={kwargs.get('tool_choice', 'auto')}", flush=True)
             
             response = await self.client.chat.completions.create(
                 model=self.deployment,
@@ -145,11 +147,17 @@ class AzureAIFoundryClient:
                 tool_choice=kwargs.get('tool_choice', 'auto') if formatted_tools else None
             )
             
+            if not response or not hasattr(response, 'choices') or not response.choices:
+                print(f"DEBUG: [AzureClient] Empty response from Azure OpenAI")
+                return None
+                
             msg = response.choices[0].message
-            print(f"DEBUG: [AzureClient] Response role: {msg.role}, has_content: {bool(msg.content)}, has_tools: {bool(msg.tool_calls)}")
+            print(f"DEBUG: [AzureClient] Response role: {msg.role}, has_content: {bool(msg.content)}, has_tools: {bool(msg.tool_calls)}", flush=True)
             return msg
         except Exception as e:
             print(f"DEBUG: [AzureClient] Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
             raise Exception(f"Azure OpenAI error: {str(e)}")
 
     def parse_tool_calls(self, response_message):

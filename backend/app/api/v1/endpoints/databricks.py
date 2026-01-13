@@ -118,12 +118,60 @@ EXECUTION_CONTEXTS: Dict[str, str] = {}
 async def execute_code(request: ExecuteRequest):
     """Execute code on Databricks cluster using stored Execution Context"""
     if request.cluster_id.startswith("mock-"):
-        # Mock execution for demo
+        # Improved Mock execution for demo: Actually run the code!
         import asyncio
-        await asyncio.sleep(1)
+        import sys
+        import io
+        import traceback
+        
+        await asyncio.sleep(0.5)
+        
+        # Simple sandbox for mock execution
+        output_buffer = io.StringIO()
+        error_msg = None
+        status = "success"
+        
+        try:
+            # Redirect stdout to capture print() calls
+            old_stdout = sys.stdout
+            sys.stdout = output_buffer
+            
+            try:
+                # Execution environment
+                # Note: This is for MOCK/DEMO only. In production, real Databricks is used.
+                import numpy as np
+                exec_globals = {"__builtins__": __builtins__, "pd": None, "plt": None, "np": np}
+                # Try to import for a better mock experience if available
+                try: 
+                    import pandas as pd
+                    exec_globals["pd"] = pd
+                except ImportError: pass
+                
+                # Use AST to handle the last expression (Jupyter/REPL style)
+                import ast
+                tree = ast.parse(request.code)
+                if tree.body and isinstance(tree.body[-1], ast.Expr):
+                    last_expr = tree.body.pop()
+                    # Execute pre-blocks
+                    if tree.body:
+                        exec(compile(tree, filename="<ast>", mode="exec"), exec_globals)
+                    # Evaluate last expression
+                    result_val = eval(compile(ast.Expression(last_expr.value), filename="<ast>", mode="eval"), exec_globals)
+                    if result_val is not None:
+                        print(result_val)
+                else:
+                    exec(request.code, exec_globals)
+            finally:
+                sys.stdout = old_stdout
+        except Exception as e:
+            status = "error"
+            error_msg = str(e)
+            traceback.print_exc()
+        
         return ExecutionResult(
-            status="success",
-            output=f"[Mock Execution] Result: {len(request.code)} chars processed.\nData processed successfully."
+            status=status,
+            output=output_buffer.getvalue() if status == "success" else None,
+            error=error_msg
         )
 
     async with await get_databricks_client() as client:

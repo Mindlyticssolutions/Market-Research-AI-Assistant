@@ -4,12 +4,51 @@ import { useAppStore } from '@/store/appStore';
 import { useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 
 export function AIAssistant() {
   const navigate = useNavigate();
-  // Use selectors to prevent re-renders when other parts of the store change (like aiScrollPosition)
+
+  // Optimized Title Cleaner
+  const cleanTitle = (text: string) => {
+    // 0. Initial cleanup and suffix stripping (e.g., "| Mode: Text Only")
+    let t = text.replace(/^(Task|Summary|Query):\s*/i, '')
+      .replace(/\s*\|\s*Mode:\s*\w+.*?$/i, '') // Strip backend mode suffix
+      .trim();
+
+    // 1. Aggressively strip everything from start until "to" if it looks like an instruction
+    // Added "provide", "write", "run", etc.
+    if (/^(write|run|create|show|calculate|analyze|plot|visualize|check|determine|find|get|can you|please|show me|I want to|provide|give me)\b/i.test(t)) {
+      // Find the first "to" that isn't inside a word
+      const match = t.match(/\bto\b[:\s]*/i);
+      if (match && match.index !== undefined && match.index < 40) { // Only if "to" is early enough
+        t = t.substring(match.index + match[0].length);
+      }
+    }
+
+    // 2. Multi-pass strip for leading joining words
+    let changed = true;
+    while (changed) {
+      const original = t;
+      t = t.replace(/^(whether|if|a|an|the|is|about|that|checking|calculating|analyzing|plotting|showing|creating|finding)\b[:\s]*/i, '');
+      t = t.replace(/^[:\s-]+/, '');
+      changed = t !== original;
+    }
+
+    // 3. Transform "Check whether a number" -> "Check number"
+    t = t.replace(/^(check|find|get|analyze|calculate|determine)\s+(whether|if|a|an|the|is|to|about)\s+(a|an|the)?/i, '$1 ');
+
+    t = t.trim();
+
+    if (t.length > 0) {
+      t = t.charAt(0).toUpperCase() + t.slice(1);
+    }
+    return t || "Analysis Query";
+  };
+
+  // Use selectors to prevent re-renders...
   const aiMessages = useAppStore(state => state.aiMessages);
   const addAIMessage = useAppStore(state => state.addAIMessage);
   const addQuery = useAppStore(state => state.addQuery);
@@ -18,6 +57,7 @@ export function AIAssistant() {
   const setAIScrollPosition = useAppStore(state => state.setAIScrollPosition);
   const setActivePlotCode = useAppStore(state => state.setActivePlotCode);
   const setActivePlot = useAppStore(state => state.setActivePlot);
+  const updateQuery = useAppStore(state => state.updateQuery);
 
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
@@ -85,6 +125,7 @@ export function AIAssistant() {
       // 2. Add empty Assistant Message (placeholder)
       // We pass empty content. The store will init logs.
       const messageId = addAIMessage('assistant', '');
+      let currentQueryId: string | null = null;
 
       // 3. Import chat service for URL
       const { chatService } = await import('@/services/chatService');
@@ -94,21 +135,56 @@ export function AIAssistant() {
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
+        console.log("WebSocket connected");
         ws.send(JSON.stringify({
           message: userInput,
           agent: 'orchestrator' // Default agent
         }));
+
+        // Add a safety timeout (e.g. 180 seconds for complex multi-agent queries)
+        const timeout = setTimeout(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            console.warn("WebSocket timeout reached");
+            ws.close();
+            updateAIMessage(messageId, {
+              content: "The request timed out. Please try again or check the backend logs.",
+              isThinking: false
+            });
+            setIsTyping(false);
+          }
+        }, 180000);
+
+        (ws as any)._timeout = timeout;
       };
 
       ws.onmessage = (event) => {
         const data = JSON.parse(event.data);
+        console.log("WS Message received:", data.type, data);
 
         if (data.type === 'status') {
           // e.g. "processing"
         } else if (data.type === 'thinking') {
           appendExecutionLog(messageId, data.content);
+        } else if (data.type === 'query_summary') {
+          console.log(`DEBUG: Updating query ${currentQueryId} with summary: ${data.content}`);
+
+          const cleaned = cleanTitle(data.content);
+          const shortTitle = (cleaned.length > 35 ? cleaned.substring(0, 32) + "..." : cleaned) || "Analysis Query";
+          console.log(`DEBUG: Final shortTitle: "${shortTitle}"`);
+
+          if (currentQueryId) {
+            updateQuery(currentQueryId, {
+              title: shortTitle,
+              prompt: data.content
+            });
+          } else {
+            // Create the query cell early in 'generating' state
+            const newQuery = addQuery(shortTitle, data.content, "");
+            currentQueryId = newQuery.id;
+            updateQuery(currentQueryId, { status: 'generating' });
+          }
         } else if (data.type === 'code_execution') {
-          appendExecutionLog(messageId, data.content);
+          appendExecutionLog(messageId, "Running python code in sandbox...");
 
           // Sync with Sandbox
           let codeToSync = data.content;
@@ -118,23 +194,64 @@ export function AIAssistant() {
             if (match) codeToSync = match[1].trim();
           }
           // Also strip "Running python code:\n" prefix if present from the log message
-          if (codeToSync.startsWith("Running python code:\n")) {
-            codeToSync = codeToSync.replace("Running python code:\n", "");
+          // Also strip "Running python code:\n" prefix if present from the log message
+          const prefixMatch = codeToSync.match(/^Running\s+\w+\s+code:\n/i);
+          if (prefixMatch) {
+            codeToSync = codeToSync.substring(prefixMatch[0].length);
           } else if (codeToSync.startsWith("Running")) {
-            // Try to find the code part
+            // Fallback for other variations
             const parts = codeToSync.split(":\n");
             if (parts.length > 1) {
               codeToSync = parts.slice(1).join(":\n");
             }
           }
 
-          // Update Sandbox Store
-          addQuery("AI Generated execution", codeToSync);
-          navigate('/sandbox');
+          updateAIMessage(messageId, {
+            wasAutoSynced: true,
+            code: codeToSync // Show code in chat even for auto runs
+          });
+
+          // Update Sandbox Store - Use existing query if created by query_summary
+          if (currentQueryId) {
+            updateQuery(currentQueryId, {
+              code: codeToSync,
+              status: 'running'
+            });
+          } else {
+            // Smartly clean the initial title
+            const cleaned = cleanTitle(userInput);
+            const initialTitle = (cleaned.length > 35 ? cleaned.substring(0, 32) + "..." : cleaned) || "New Query";
+            console.log(`DEBUG: Final initialTitle: "${initialTitle}"`);
+
+            const newQuery = addQuery(initialTitle, userInput, codeToSync);
+            currentQueryId = newQuery.id;
+            updateQuery(currentQueryId, { status: 'running' });
+          }
+
+          // navigate('/sandbox');
+          // navigate('/sandbox');
+          toast.info("Running code in Sandbox...", {
+            description: "Check the Sandbox page to see live execution.",
+            action: {
+              label: "Go to Sandbox",
+              onClick: () => navigate('/sandbox')
+            }
+          });
 
         } else if (data.type === 'observation') {
           appendExecutionLog(messageId, data.content);
+
+          // Update the notebook cell with the result
+          if (currentQueryId) {
+            updateQuery(currentQueryId, {
+              output: data.content,
+              status: data.content.toLowerCase().includes("error") ? 'error' : 'success'
+            });
+          }
         } else if (data.type === 'response') {
+          console.log("Received final response, clearing timeout");
+          if ((ws as any)._timeout) clearTimeout((ws as any)._timeout);
+
           // Final response
           let fullResponse = data.content;
           let suggestions: string[] = [];
@@ -174,6 +291,7 @@ export function AIAssistant() {
           setIsTyping(false);
           ws.close();
         } else if (data.type === 'error') {
+          if ((ws as any)._timeout) clearTimeout((ws as any)._timeout);
           updateAIMessage(messageId, {
             content: `Error: ${data.message}`,
             isThinking: false
@@ -181,6 +299,11 @@ export function AIAssistant() {
           setIsTyping(false);
           ws.close();
         }
+      };
+
+      ws.onclose = () => {
+        if ((ws as any)._timeout) clearTimeout((ws as any)._timeout);
+        setIsTyping(false);
       };
 
       ws.onerror = (error) => {
@@ -199,7 +322,11 @@ export function AIAssistant() {
   };
 
   const handleSendToSandbox = (code: string, prompt: string) => {
-    addQuery(prompt, code);
+    // Smartly clean the title for manual send
+    const cleaned = cleanTitle(prompt);
+    const displayTitle = (cleaned.length > 35 ? cleaned.substring(0, 32) + "..." : cleaned) || "Manual Query";
+
+    addQuery(displayTitle, prompt, code);
     navigate('/sandbox');
   };
 
@@ -318,7 +445,9 @@ export function AIAssistant() {
                   </div>
                 )}
 
-                <p className="text-sm whitespace-pre-wrap">{message.content || (message.isThinking ? '' : 'No content')}</p>
+                {message.content && (
+                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                )}
 
                 {message.code && (
                   <div className="mt-3 rounded-lg overflow-hidden border border-border/50">
@@ -342,14 +471,16 @@ export function AIAssistant() {
                       {message.code}
                     </pre>
                     <div className="px-3 py-2 bg-editor-bg border-t border-border/50 flex gap-2">
-                      <Button
-                        size="sm"
-                        onClick={() => handleSendToSandbox(message.code!, message.content)}
-                        className="flex-1 gap-2"
-                      >
-                        <Send className="w-3.5 h-3.5" />
-                        Send to Sandbox
-                      </Button>
+                      {!message.wasAutoSynced && (
+                        <Button
+                          size="sm"
+                          onClick={() => handleSendToSandbox(message.code!, message.content)}
+                          className="flex-1 gap-2"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          Send to Sandbox
+                        </Button>
+                      )}
                     </div>
                   </div>
                 )}

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import sys
 import os
 import asyncio
+import re
+import json
 
 # Add backend to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'backend'))
@@ -87,6 +89,10 @@ class BaseAgent(ABC):
         """Get the tools available to this agent"""
         pass
     
+    def _get_tool_choice(self) -> str:
+        """Get tool choice mode for this agent. Override to 'required' to force tool use."""
+        return "auto"
+    
     def _get_data_access_policy(self) -> str:
         """Standard data access policy for all agents"""
         return """
@@ -114,21 +120,28 @@ DATA ACCESS POLICY:
         }
         
         try:
+            print(f"DEBUG: [{self.name}] retrieve_context started for query: {query[:50]}")
             # DIRECT ACCESS: Instantiate retrievers directly
             from app.rag.retriever import RAGRetriever
             from app.kag.graph_retriever import KAGRetriever
             
             # 1. Direct RAG Access (Metadata Only)
+            print(f"DEBUG: [{self.name}] Initializing RAGRetriever...")
             rag = RAGRetriever()
+            print(f"DEBUG: [{self.name}] Calling RAGRetriever.retrieve...")
             rag_docs = await rag.retrieve(query)
+            print(f"DEBUG: [{self.name}] RAGRetriever.retrieve complete. docs count: {len(rag_docs) if rag_docs else 0}")
             
             if rag_docs:
                 context["rag_results"] = rag_docs
                 context["sources_used"].append("Azure AI Search (Direct Metadata)")
                 
             # 2. Direct KAG Access (Graph Structure Only)
+            print(f"DEBUG: [{self.name}] Initializing KAGRetriever...")
             kag = KAGRetriever()
+            print(f"DEBUG: [{self.name}] Calling KAGRetriever.retrieve...")
             kag_entities = await kag.retrieve(query)
+            print(f"DEBUG: [{self.name}] KAGRetriever.retrieve complete. entities count: {len(kag_entities) if kag_entities else 0}")
             
             if kag_entities:
                 context["kag_results"] = kag_entities
@@ -155,9 +168,12 @@ DATA ACCESS POLICY:
                 context_parts.append("No relevant metadata found.")
                 
             context["context_text"] = "\n".join(context_parts)
+            print(f"DEBUG: [{self.name}] retrieve_context complete.")
                 
         except Exception as e:
-            print(f"Direct retrieval error: {e}")
+            print(f"DEBUG: [{self.name}] Direct retrieval error: {e}")
+            import traceback
+            traceback.print_exc()
         
         return context
     
@@ -206,22 +222,43 @@ DATA ACCESS POLICY:
             if callback:
                 await callback("thinking", f"Planning how to answer: {query}")
 
-            print(f"DEBUG: [{self.name}] starting execute with query: {query[:50]}...")
+            has_executed_tool = False  # Track if we've already executed a tool
+            
+            print(f"DEBUG: [{self.name}] starting execute with query: {query[:50]}...", flush=True)
             while step_count < max_steps:
                 if self.llm:
-                    print(f"DEBUG: [{self.name}] Step {step_count} - Calling LLM...")
+                    print(f"DEBUG: [{self.name}] Step {step_count} - Calling LLM...", flush=True)
                     try:
                         # 1. Plan / Think
                         tools = self._get_tools()
                         
                         # Call LLM with tools
+                        # IMPORTANT: After a tool has been executed, switch to "none" to allow final response
+                        if has_executed_tool:
+                            tool_choice_value = "none"  # Force text response after tool execution
+                        else:
+                            tool_choice_value = self._get_tool_choice() if tools else None
+                        print(f"DEBUG: [{self.name}] Using tool_choice={tool_choice_value}", flush=True)
+                        
+                        # When tool_choice is "none", don't pass tools to avoid LLM confusion
+                        tools_to_pass = None if tool_choice_value == "none" else (tools if tools else None)
+                        
                         response_message = await self.llm.chat_completion(
                             messages=messages,
-                            tools=tools if tools else None,
-                            tool_choice="auto" if tools else None 
+                            tools=tools_to_pass,
+                            tool_choice=tool_choice_value if tools_to_pass else None
                         )
                         
-                        print(f"DEBUG: [{self.name}] LLM Response Content: {response_message.content[:100]}...")
+                        content_str = response_message.content[:100] if response_message.content else "None (Tool Call)"
+                        print(f"DEBUG: [{self.name}] LLM Response Content: {content_str}...")
+                        
+                        # Extract Dynamic Query Summary [Task: ...]
+                        if response_message.content:
+                            summary_match = re.search(r'\[(?:Task|Summary):\s*(.*?)\]', response_message.content)
+                            if summary_match and callback:
+                                summary = summary_match.group(1).strip()
+                                print(f"DEBUG: [{self.name}] Detected Task Summary: {summary}")
+                                await callback("query_summary", summary)
                         
                         # Check for tool calls
                         tool_calls = self.llm.parse_tool_calls(response_message)
@@ -268,7 +305,7 @@ DATA ACCESS POLICY:
                                         language = args.get("language", "python")
                                         
                                         if callback:
-                                            await callback("code_execution", f"Running {language} code:\n{code}")
+                                            await callback("code_execution", code)
                                         
                                         cluster_id = full_context.get("cluster_id", "mock-cluster-1")
                                         result = await execute_code(ExecuteRequest(
@@ -286,9 +323,9 @@ DATA ACCESS POLICY:
                                         
                                         if callback:
                                             if result.status == "success":
-                                                await callback("observation", f"Execution successful. Output len: {len(result.output or '')}")
+                                                await callback("observation", result.output if result.output else "Execution successful (no output).")
                                             else:
-                                                await callback("observation", f"Execution failed: {result.error}")
+                                                await callback("observation", f"Error: {result.error}")
                                     
                                     # 3. Handle default routing for Orchestrator (Terminal Action)
                                     elif function_name == "route_to_agent":
@@ -327,34 +364,35 @@ DATA ACCESS POLICY:
                                 })
                             
                             step_count += 1
+                            has_executed_tool = True  # Mark that we've executed tools, next turn should allow text response
+                            continue # GO TO NEXT TURN
                         
-                            # No tool calls -> Final Answer
-                            content = response_message.content
-                            
-                            # SANITY CHECK: If content looks like a tool call string, it's likely an echo or mistake.
-                            # We don't want to return "route_to_agent(...)" as the final answer.
-                            if content and ("route_to_agent" in content or "execute_databricks_code" in content):
-                                print(f"DEBUG: [{self.name}] Final content looks like a tool call string. Attempting recovery turn.")
-                                # If it's the Orchestrator, it might have failed to use the real tool but wrote it in text.
-                                # Let's try to parse it as a tool call one last time or just take another turn.
-                                step_count += 1
-                                continue
-                            
-                            print(f"DEBUG: [{self.name}] No more tool calls. Forming final response.")
-                            sources_used = retrieved_context.get("sources_used", [])
-                            sources_used = retrieved_context.get("sources_used", [])
-                            
-                            return AgentResponse(
-                                content=content,
-                                agent_name=self.name,
-                                sources=sources_used + [str(r.get("title", r.get("content", "")[:50])) for r in retrieved_context.get("rag_results", [])[:3]],
-                                metadata={
-                                    "context_used": bool(retrieved_context["rag_results"]),
-                                    "sources_used": sources_used,
-                                    "data_access": "Hybrid RAG + Code Interpreter"
-                                },
-                                success=True
-                            )
+                        # No tool calls -> Final Answer
+                        content = response_message.content
+                        
+                        # SANITY CHECK: If content looks like a tool call string, it's likely an echo or mistake.
+                        # We don't want to return "route_to_agent(...)" as the final answer.
+                        if content and ("route_to_agent" in content or "execute_databricks_code" in content):
+                            print(f"DEBUG: [{self.name}] Final content looks like a tool call string. Attempting recovery turn.")
+                            # If it's the Orchestrator, it might have failed to use the real tool but wrote it in text.
+                            # Let's try to parse it as a tool call one last time or just take another turn.
+                            step_count += 1
+                            continue
+                        
+                        print(f"DEBUG: [{self.name}] No more tool calls. Forming final response.")
+                        sources_used = retrieved_context.get("sources_used", [])
+                        
+                        return AgentResponse(
+                            content=content,
+                            agent_name=self.name,
+                            sources=sources_used + [str(r.get("title", r.get("content", "")[:50])) for r in retrieved_context.get("rag_results", [])[:3]],
+                            metadata={
+                                "context_used": bool(retrieved_context["rag_results"]),
+                                "sources_used": sources_used,
+                                "data_access": "Hybrid RAG + Code Interpreter"
+                            },
+                            success=True
+                        )
 
                     except Exception as llm_error:
                         print(f"LLM execution error: {llm_error}")
