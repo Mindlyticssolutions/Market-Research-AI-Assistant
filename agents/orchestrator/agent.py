@@ -20,7 +20,7 @@ class OrchestratorAgent(BaseAgent):
         self.agent_routing = {
             "sql": ["sql", "query", "database", "table", "select", "join"],
             "python": ["code", "python", "script", "analyze", "calculate", "plot", "visualize"],
-            "researcher": ["research", "market", "trend", "competitor", "industry", "report"],
+            "researcher": ["research", "market", "trend", "competitor", "industry", "report", "describe", "about", "list", "files", "schema"],
             "analyst": ["analyze", "statistics", "insight", "pattern", "correlation"],
             "writer": ["write", "report", "summary", "document", "executive"]
         }

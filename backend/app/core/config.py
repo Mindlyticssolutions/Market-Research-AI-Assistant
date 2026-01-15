@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # Azure Blob Storage
     AZURE_STORAGE_CONNECTION_STRING: str = ""
     AZURE_STORAGE_CONTAINER: str = "uploads"
+    AZURE_STORAGE_SAS_TOKEN: str = ""
     
     # Azure Document Intelligence
     AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: str = ""

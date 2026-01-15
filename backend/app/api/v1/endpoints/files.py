@@ -21,7 +21,7 @@ router = APIRouter()
 
 
 # Text-extractable extensions
-TEXT_EXTENSIONS = {"txt", "md", "rst", "csv", "json", "xml", "yaml", "yml", "html", "htm"}
+TEXT_EXTENSIONS = {"txt", "md", "rst", "csv", "json", "xml", "yaml", "yml", "html", "htm","xlsx"}
 
 
 class FileInfo(BaseModel):
@@ -46,12 +46,12 @@ class UploadResponse(BaseModel):
 
 
 # In-memory storage for demo (replace with database in production)
-files_store: dict[str, FileInfo] = {}
+#files_store: dict[str, FileInfo] = {}
 
 
 
-async def _upload_to_blob(filename: str, content: bytes, file_id: str) -> str:
-    """Upload file content to Azure Blob Storage"""
+async def _upload_to_blob(filename: str, content: bytes, file_id: str, metadata: dict = None) -> str:
+    """Upload file content to Azure Blob Storage with metadata"""
     try:
         if not settings.AZURE_STORAGE_CONNECTION_STRING:
             print("Warning: Azure Storage not configured")
@@ -68,7 +68,7 @@ async def _upload_to_blob(filename: str, content: bytes, file_id: str) -> str:
         blob_name = f"{file_id}/{filename}"
         blob_client = container_client.get_blob_client(blob_name)
         
-        blob_client.upload_blob(content, overwrite=True)
+        blob_client.upload_blob(content, overwrite=True, metadata=metadata)
         return blob_client.url
     except Exception as e:
         print(f"Blob upload error: {e}")
@@ -128,9 +128,19 @@ async def _extract_text_content(content: bytes, ext: str) -> str:
 async def _process_and_index_file(file_id: str, content: bytes, ext: str, filename: str, blob_url: str):
     """Background task to process and index file into RAG"""
     try:
-        # Update status to processing
-        if file_id in files_store:
-            files_store[file_id].status = "processing"
+        # Update status to processing in Blob Metadata
+        try:
+            blob_service_client = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
+            container_client = blob_service_client.get_container_client(settings.AZURE_STORAGE_CONTAINER)
+            blob_name = f"{file_id}/{filename}"
+            blob_client = container_client.get_blob_client(blob_name)
+            
+            # Fetch current metadata, update, and set back
+            meta = blob_client.get_blob_properties().metadata
+            meta["status"] = "processing"
+            blob_client.set_blob_metadata(meta)
+        except Exception as e:
+            print(f"Error updating blob metadata to processing: {e}")
         
         # Extract text content
         text_content = await _extract_text_content(content, ext)
@@ -138,9 +148,6 @@ async def _process_and_index_file(file_id: str, content: bytes, ext: str, filena
         if not text_content:
              text_content = f"Filename: {filename} (Content not extractable)"
              
-        # Allow short content (e.g. just filename for binary files)
-
-        
         # Prepare title with schema for CSVs
         display_title = filename
         if ext == 'csv':
@@ -166,23 +173,28 @@ async def _process_and_index_file(file_id: str, content: bytes, ext: str, filena
                 source=blob_url or filename
             )
             
-            if result.get("success"):
-                if file_id in files_store:
-                    files_store[file_id].status = "indexed"
-                    files_store[file_id].chunks_indexed = result.get("chunks_indexed", 0)
-            else:
-                if file_id in files_store:
-                    files_store[file_id].status = "failed"
+            # Update status in Blob Metadata
+            try:
+                meta = blob_client.get_blob_properties().metadata
+                if result.get("success"):
+                    meta["status"] = "indexed"
+                    meta["chunks_indexed"] = str(result.get("chunks_indexed", 0))
+                else:
+                    meta["status"] = "failed"
+                blob_client.set_blob_metadata(meta)
+            except Exception as e:
+                print(f"Error updating final blob metadata: {e}")
                     
         except Exception as e:
             print(f"Indexing error: {e}")
-            if file_id in files_store:
-                files_store[file_id].status = "failed"
+            try:
+                meta = blob_client.get_blob_properties().metadata
+                meta["status"] = "failed"
+                blob_client.set_blob_metadata(meta)
+            except: pass
                 
     except Exception as e:
         print(f"Processing error: {e}")
-        if file_id in files_store:
-            files_store[file_id].status = "failed"
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -199,7 +211,6 @@ async def upload_file(
     # Validate file extension - OK, allowing all
     ext = file.filename.split(".")[-1].lower() if "." in file.filename else ""
 
-    
     # Generate file ID
     file_id = str(uuid.uuid4())
     
@@ -207,22 +218,18 @@ async def upload_file(
     content = await file.read()
     size = len(content)
     
-    # Upload to Blob Storage
-    blob_url = await _upload_to_blob(file.filename, content, file_id)
-
-    # Create file info
-    file_info = FileInfo(
-        id=file_id,
-        filename=file.filename,
-        file_type=ext,
-        size=size,
-        uploaded_at=datetime.utcnow(),
-        status="pending",
-        blob_url=blob_url
-    )
+    # Prepare metadata for storage
+    metadata = {
+        "file_id": file_id,
+        "filename": file.filename,
+        "file_type": ext,
+        "size": str(size),
+        "uploaded_at": datetime.utcnow().isoformat(),
+        "status": "pending"
+    }
     
-    # Store file info
-    files_store[file_id] = file_info
+    # Upload to Blob Storage with metadata
+    blob_url = await _upload_to_blob(file.filename, content, file_id, metadata=metadata)
     
     # Add background task for processing and indexing
     background_tasks.add_task(
@@ -245,45 +252,110 @@ async def upload_file(
 
 @router.get("/list", response_model=List[FileInfo])
 async def list_files():
-    """List all uploaded files"""
-    return list(files_store.values())
+    """List all uploaded files by querying Blob Storage metadata"""
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
+        container_client = blob_service_client.get_container_client(settings.AZURE_STORAGE_CONTAINER)
+        
+        if not container_client.exists():
+            return []
+            
+        blobs = container_client.list_blobs(include=["metadata"])
+        files = []
+        
+        for blob in blobs:
+            meta = blob.metadata or {}
+            # Reconstruct FileInfo
+            print(meta.get("file_id", "unknown"), '')
+            files.append(FileInfo(
+                id=meta.get("file_id", "unknown"),
+                filename=meta.get("filename", blob.name.split("/")[-1]),
+                file_type=meta.get("file_type", ""),
+                size=int(meta.get("size", blob.size)),
+                uploaded_at=datetime.fromisoformat(meta.get("uploaded_at")) if meta.get("uploaded_at") else datetime.utcnow(),
+                status=meta.get("status", "unknown"),
+                blob_url=f"{container_client.url}/{blob.name}",
+                chunks_indexed=int(meta.get("chunks_indexed", 0)) if meta.get("chunks_indexed") else None
+            ))
+            
+        return files
+    except Exception as e:
+        print(f"Error listing files from blob: {e}")
+        return []
 
 
 @router.get("/{file_id}", response_model=FileInfo)
 async def get_file(file_id: str):
-    """Get file information by ID"""
-    if file_id not in files_store:
-        raise HTTPException(status_code=404, detail="File not found")
-    return files_store[file_id]
+    """Get file information by ID by searching Blob Storage"""
+    # file_id might have quotes from Swagger UI, strip them just in case
+    clean_id = file_id.strip('"').strip("'")
+    
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
+        container_client = blob_service_client.get_container_client(settings.AZURE_STORAGE_CONTAINER)
+        
+        # Blobs are stored as {file_id}/{filename}
+        # We need to find the blob starting with this prefix
+        blobs = list(container_client.list_blobs(name_starts_with=f"{clean_id}/", include=["metadata"]))
+        
+        if not blobs:
+            raise HTTPException(status_code=404, detail=f"File with ID {clean_id} not found")
+            
+        blob = blobs[0]
+        meta = blob.metadata or {}
+        
+        print(meta.get("file_id", clean_id))
+        return FileInfo(
+            id=meta.get("file_id", clean_id),
+            filename=meta.get("filename", blob.name.split("/")[-1]),
+            file_type=meta.get("file_type", ""),
+            size=int(meta.get("size", blob.size)),
+            uploaded_at=datetime.fromisoformat(meta.get("uploaded_at")) if meta.get("uploaded_at") else datetime.utcnow(),
+            status=meta.get("status", "unknown"),
+            blob_url=f"{container_client.url}/{blob.name}",
+            chunks_indexed=int(meta.get("chunks_indexed", 0)) if meta.get("chunks_indexed") else None
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching file from blob: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.delete("/{file_id}")
 async def delete_file(file_id: str):
-    """Delete a file and remove from RAG index"""
-    if file_id not in files_store:
-        raise HTTPException(status_code=404, detail="File not found")
+    """Delete a file and remove from RAG index and Blob Storage"""
+    clean_id = file_id.strip('"').strip("'")
     
-    # Remove from RAG index
+    # 1. Remove from RAG index
     try:
         from app.rag.indexer import RAGIndexer
         indexer = RAGIndexer()
-        await indexer.delete_document(file_id)
+        await indexer.delete_document(clean_id)
     except Exception as e:
         print(f"Error removing from RAG: {e}")
     
-    del files_store[file_id]
-    return {"message": "File deleted successfully", "file_id": file_id}
+    # 2. Delete from Blob Storage
+    try:
+        blob_service_client = BlobServiceClient.from_connection_string(settings.AZURE_STORAGE_CONNECTION_STRING)
+        container_client = blob_service_client.get_container_client(settings.AZURE_STORAGE_CONTAINER)
+        
+        blobs = container_client.list_blobs(name_starts_with=f"{clean_id}/")
+        for blob in blobs:
+            container_client.delete_blob(blob.name)
+            
+    except Exception as e:
+        print(f"Error deleting from blob: {e}")
+        
+    return {"message": "File deleted successfully", "file_id": clean_id}
 
 
 @router.get("/{file_id}/status")
 async def get_file_status(file_id: str):
-    """Get file processing status"""
-    if file_id not in files_store:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    file_info = files_store[file_id]
+    """Get file processing status from Blob Storage"""
+    file_info = await get_file(file_id)
     return {
-        "file_id": file_id,
+        "file_id": file_info.id,
         "filename": file_info.filename,
         "status": file_info.status,
         "chunks_indexed": file_info.chunks_indexed,

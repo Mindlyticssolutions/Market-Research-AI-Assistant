@@ -33,7 +33,7 @@ class RAGIndexer:
             azure_search_key=self.key,
             index_name=self.index_name,
             embedding_function=self.embeddings,
-            # We can define additional fields schema if needed, but LangChain handles defaults well
+            search_type="hybrid" # Keep consistent with retriever
         )
 
     async def create_index_if_not_exists(self):

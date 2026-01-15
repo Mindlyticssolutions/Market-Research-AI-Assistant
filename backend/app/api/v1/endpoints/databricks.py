@@ -117,6 +117,29 @@ EXECUTION_CONTEXTS: Dict[str, str] = {}
 @router.post("/execute", response_model=ExecutionResult)
 async def execute_code(request: ExecuteRequest):
     """Execute code on Databricks cluster using stored Execution Context"""
+    
+    # --- AUTO-INJECT CREDENTIALS ---
+    # We inject Spark configuration for Azure Storage to ensure WASBS paths work.
+    credential_injection = ""
+    account_name = settings.azure_storage_account_name
+    
+    if account_name:
+        if settings.AZURE_STORAGE_SAS_TOKEN:
+            # Use SAS Token if provided (safer/limited)
+            # Standard SAS config for WASBS
+            credential_injection = f"""
+# Auto-injected SAS credentials for WASBS access
+spark.conf.set("fs.azure.sas.{settings.AZURE_STORAGE_CONTAINER}.{account_name}.blob.core.windows.net", "{settings.AZURE_STORAGE_SAS_TOKEN}")
+"""
+        elif settings.azure_storage_account_key:
+            # Fallback to Account Key
+            credential_injection = f"""
+# Auto-injected Account Key for WASBS access
+spark.conf.set("fs.azure.account.key.{account_name}.blob.core.windows.net", "{settings.azure_storage_account_key}")
+"""
+    
+    request_code_with_creds = credential_injection + "\n" + request.code
+    
     if request.cluster_id.startswith("mock-"):
         # Improved Mock execution for demo: Actually run the code!
         import asyncio
@@ -149,7 +172,7 @@ async def execute_code(request: ExecuteRequest):
                 
                 # Use AST to handle the last expression (Jupyter/REPL style)
                 import ast
-                tree = ast.parse(request.code)
+                tree = ast.parse(request.code) # Use original code for AST parsing
                 if tree.body and isinstance(tree.body[-1], ast.Expr):
                     last_expr = tree.body.pop()
                     # Execute pre-blocks
@@ -188,12 +211,12 @@ async def execute_code(request: ExecuteRequest):
             context_id = ctx_resp.json()["id"]
             EXECUTION_CONTEXTS[request.cluster_id] = context_id
 
-        # Execute command
+        # Execute command (with credentials prepended)
         cmd_resp = await client.post("/api/1.2/commands/execute", json={
             "language": request.language,
             "clusterId": request.cluster_id,
             "contextId": context_id,
-            "command": request.code
+            "command": request_code_with_creds
         })
         
         # If context invalid (400/404), try ensuring context is valid by recreating it
@@ -211,7 +234,7 @@ async def execute_code(request: ExecuteRequest):
                     "language": request.language,
                     "clusterId": request.cluster_id,
                     "contextId": context_id,
-                    "command": request.code
+                    "command": request_code_with_creds
                 })
 
         if cmd_resp.status_code != 200:

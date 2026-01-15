@@ -152,20 +152,33 @@ DATA ACCESS POLICY:
             
             if rag_docs:
                 context_parts.append("\n📁 Documents (Metadata):")
-                for doc in rag_docs[:5]:
+                # Deduplicate by title/filename to avoid cluttering context with chunks
+                seen_files = set()
+                for doc in rag_docs:
                     title = doc.get('title', 'Unknown')
-                    fname = doc.get('metadata_storage_name', 'Unknown File')
-                    context_parts.append(f"  - [Doc] {title} ({fname})")
+                    # Fallback chain for filename
+                    fname = doc.get('metadata_storage_name') or doc.get('source') or doc.get('filename') or "Unknown File"
+                    
+                    # If it's a long source URL, just take the basename
+                    if "/" in fname or "\\" in fname:
+                        import os
+                        fname = os.path.basename(fname)
+                    
+                    file_key = f"{title}_{fname}"
+                    if file_key not in seen_files:
+                        file_id = doc.get('file_id') or doc.get('id') or "unknown_id"
+                        context_parts.append(f"  - [Doc] {title} (ID: {file_id}) (Filename: {fname})")
+                        seen_files.add(file_key)
 
             if kag_entities:
                 context_parts.append("\n🔗 Knowledge Graph (Structure):")
-                for entity in kag_entities[:5]:
+                for entity in kag_entities[:10]: # Show more entities
                     name = entity.get('name', 'Unknown')
                     label = entity.get('label', 'Entity')
                     context_parts.append(f"  - [Graph] {label}: {name}")
             
             if not rag_docs and not kag_entities:
-                context_parts.append("No relevant metadata found.")
+                context_parts.append("No relevant metadata found for this query.")
                 
             context["context_text"] = "\n".join(context_parts)
             print(f"DEBUG: [{self.name}] retrieve_context complete.")
