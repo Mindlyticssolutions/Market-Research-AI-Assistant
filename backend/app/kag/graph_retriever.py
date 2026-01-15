@@ -63,16 +63,23 @@ class KAGRetriever:
         
         def _run_query():
             try:
+                print(f"DEBUG: [KAGRetriever] Getting client...")
                 client = self._get_client()
+                print(f"DEBUG: [KAGRetriever] Submitting query: {query[:50]}...")
                 result_set = client.submit(query)
-                return result_set.all().result()
+                print(f"DEBUG: [KAGRetriever] Query submitted, waiting for results...")
+                results = result_set.all().result()
+                print(f"DEBUG: [KAGRetriever] Query complete. Returned {len(results) if results else 0} results.")
+                return results
             except Exception as e:
-                print(f"Gremlin query error: {e}")
+                print(f"DEBUG: [KAGRetriever] Gremlin query error: {e}")
                 return []
 
         try:
+            print(f"DEBUG: [KAGRetriever] Running _run_query in executor...")
             loop = asyncio.get_event_loop()
             results = await loop.run_in_executor(None, _run_query)
+            print(f"DEBUG: [KAGRetriever] Executor returned.")
             return results
         except Exception as e:
             print(f"Gremlin execution error: {e}")

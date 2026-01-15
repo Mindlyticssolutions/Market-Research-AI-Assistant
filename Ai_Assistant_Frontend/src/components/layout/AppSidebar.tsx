@@ -1,5 +1,5 @@
 import { NavLink, useLocation } from 'react-router-dom';
-import { Home, FlaskConical, ChevronLeft, ChevronRight, Moon, Sun } from 'lucide-react';
+import { Home, FlaskConical, ChevronLeft, ChevronRight, Moon, Sun, TrendingUp } from 'lucide-react';
 import { useAppStore } from '@/store/appStore';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -8,6 +8,7 @@ import { useTheme } from 'next-themes';
 const navItems = [
   { path: '/', label: 'Home', icon: Home },
   { path: '/sandbox', label: 'Sandbox', icon: FlaskConical },
+  { path: '/insights', label: 'Insights', icon: TrendingUp },
 ];
 
 export function AppSidebar() {
@@ -35,12 +36,10 @@ export function AppSidebar() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="flex items-center gap-2"
             >
-              <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-                <FlaskConical className="w-4 h-4 text-primary" />
-              </div>
-              <span className="font-semibold text-foreground tracking-tight">Analytix</span>
+              <NavLink to="/" className="flex items-center gap-2">
+                <img src="/analytix_logo.png" alt="Analytix" className="h-10 w-auto object-contain" />
+              </NavLink>
             </motion.div>
           ) : (
             <motion.div
@@ -48,9 +47,16 @@ export function AppSidebar() {
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center mx-auto"
+              className="mx-auto"
             >
-              <FlaskConical className="w-4 h-4 text-primary" />
+              <NavLink to="/" className="w-8 h-8 flex items-center justify-center rounded-lg bg-primary/10 overflow-hidden">
+                {/* For collapsed, likely just want the icon part or scaled down. 
+                     Since I can't easily crop, I'll show the full logo scaled or fallback to an icon if provided. 
+                     User said "change the logo", let's assuming the image works. 
+                     If the image is wide, it might look small in 32px. 
+                     I'll stick to a simple clean fit. */}
+                <img src="/analytix_logo.png" alt="Analytix" className="h-full w-full object-cover" />
+              </NavLink>
             </motion.div>
           )}
         </AnimatePresence>

@@ -19,6 +19,7 @@ class DataSource(Enum):
     """Enumeration of allowed data sources"""
     RAG = "rag"  # Azure AI Search
     KAG = "kag"  # Cosmos DB Gremlin
+    BLOB = "blob" # Azure Blob Storage
 
 
 @dataclass
@@ -30,7 +31,12 @@ class RetrievedData:
     # Content is intentionally REMOVED - agents only get metadata
     
     def __str__(self) -> str:
-        source_label = "Document" if self.source == DataSource.RAG else "Knowledge Graph"
+        source_label = "Document"
+        if self.source == DataSource.KAG:
+            source_label = "Knowledge Graph"
+        elif self.source == DataSource.BLOB:
+            source_label = "Blob Storage"
+            
         title = self.metadata.get("title", self.metadata.get("filename", "Unknown"))
         return f"[{source_label}] {title}"
     
@@ -62,11 +68,12 @@ class DataAccessResult:
     """Result from data access layer - METADATA ONLY"""
     rag_results: List[RetrievedData]
     kag_results: List[RetrievedData]
+    blob_results: List[RetrievedData]
     sources_used: List[str]
     
     @property
     def has_data(self) -> bool:
-        return len(self.rag_results) > 0 or len(self.kag_results) > 0
+        return len(self.rag_results) > 0 or len(self.kag_results) > 0 or len(self.blob_results) > 0
     
     def get_context_text(self, max_results: int = 5) -> str:
         """Get formatted context text for LLM - METADATA ONLY, NO DATA CONTENT"""
@@ -83,10 +90,15 @@ class DataAccessResult:
             context_parts.append("\n🔗 Knowledge Graph Entities:")
             for result in self.kag_results[:max_results]:
                 context_parts.append(f"  - {result.get_metadata_summary()}")
+
+        if self.blob_results:
+            context_parts.append("\n💾 Blob Storage Files (Raw Metadata):")
+            for result in self.blob_results[:max_results]:
+                context_parts.append(f"  - {result.get_metadata_summary()}")
         
         context_parts.append("\n⚠️ NOTE: You can only see metadata above. You do NOT have access to actual data values.")
         
-        if not self.rag_results and not self.kag_results:
+        if not self.rag_results and not self.kag_results and not self.blob_results:
             return "No data metadata found. Ask user to upload documents first."
         
         return "\n".join(context_parts)
@@ -119,6 +131,7 @@ class DataAccessLayer:
         
         self._rag_retriever = None
         self._kag_retriever = None
+        self._blob_retriever = None
         self._access_log: List[Dict[str, Any]] = []
         self._initialized = True
     
@@ -144,6 +157,17 @@ class DataAccessLayer:
                 print(f"[DataAccessLayer] KAG retriever not available: {e}")
         return self._kag_retriever
     
+    @property
+    def blob_retriever(self):
+        """Lazy load Blob retriever"""
+        if self._blob_retriever is None:
+            try:
+                from app.blob.retriever import BlobRetriever
+                self._blob_retriever = BlobRetriever()
+            except Exception as e:
+                print(f"[DataAccessLayer] Blob retriever not available: {e}")
+        return self._blob_retriever
+    
     def _log_access(self, query: str, sources: List[DataSource], result_count: int):
         """Log data access for auditing"""
         import datetime
@@ -160,6 +184,7 @@ class DataAccessLayer:
         query: str, 
         use_rag: bool = True, 
         use_kag: bool = True,
+        use_blob: bool = True,
         top_k: int = 5
     ) -> DataAccessResult:
         """
@@ -171,6 +196,7 @@ class DataAccessLayer:
             query: Search query
             use_rag: Whether to search Azure AI Search (RAG)
             use_kag: Whether to search Cosmos DB Gremlin (KAG)
+            use_blob: Whether to search Blob Storage directly (Metadata)
             top_k: Maximum results per source
             
         Returns:
@@ -178,13 +204,49 @@ class DataAccessLayer:
         """
         rag_results: List[RetrievedData] = []
         kag_results: List[RetrievedData] = []
+        blob_results: List[RetrievedData] = []
         sources_used: List[str] = []
         
-        # Retrieve from RAG (Azure AI Search)
+        # 0. Fetch active blobs first to use as "Source of Truth"
+        active_file_ids = set()
+        if self.blob_retriever:
+            try:
+                # Get all blobs to cross-reference
+                all_blobs = await self.blob_retriever.list_all(limit=1000)
+                active_file_ids = {b.get("file_id") for b in all_blobs if b.get("file_id")}
+                # Also include these in the results if it's a general search or matches
+                for result in all_blobs:
+                    # Basic match for blob results if query is provided
+                    if not query or query == "*" or query.lower() in result.get("filename", "").lower():
+                         blob_results.append(RetrievedData(
+                            source=DataSource.BLOB,
+                            metadata={
+                                "filename": result.get("filename", ""),
+                                "file_id": result.get("file_id", ""),
+                                "status": result.get("status", ""),
+                                "uploaded_at": result.get("uploaded_at", ""),
+                                "size": result.get("size", 0),
+                                "title": result.get("filename", "") 
+                            },
+                            score=result.get("score", 0.0)
+                        ))
+                if blob_results:
+                    sources_used.append("Azure Blob Storage")
+            except Exception as e:
+                print(f"[DataAccessLayer] Initial blob list error: {e}")
+
+        # 1. Retrieve from RAG (Azure AI Search)
         if use_rag and self.rag_retriever:
             try:
                 raw_results = await self.rag_retriever.retrieve(query, top_k=top_k)
                 for result in raw_results:
+                    file_id = result.get("file_id", "")
+                    
+                    # STRICT FILTER: Only show if file still exists in Blob Storage
+                    if file_id and file_id not in active_file_ids:
+                        print(f"[DataAccessLayer] Hiding deleted file from RAG: {result.get('title')} ({file_id})")
+                        continue
+
                     # STRIPPING CONTENT - METADATA ONLY
                     rag_results.append(RetrievedData(
                         source=DataSource.RAG,
@@ -193,7 +255,7 @@ class DataAccessLayer:
                             "title": result.get("title", "Unknown"),
                             "source": result.get("source", ""),
                             "chunk_id": result.get("chunk_id", ""),
-                            "file_id": result.get("file_id", "")
+                            "file_id": file_id
                         },
                         score=result.get("score", 0.0)
                     ))
@@ -229,11 +291,14 @@ class DataAccessLayer:
             sources_queried.append(DataSource.RAG)
         if use_kag:
             sources_queried.append(DataSource.KAG)
-        self._log_access(query, sources_queried, len(rag_results) + len(kag_results))
+        if use_blob:
+            sources_queried.append(DataSource.BLOB)
+        self._log_access(query, sources_queried, len(rag_results) + len(kag_results) + len(blob_results))
         
         return DataAccessResult(
             rag_results=rag_results,
             kag_results=kag_results,
+            blob_results=blob_results,
             sources_used=sources_used
         )
     
@@ -244,6 +309,12 @@ class DataAccessLayer:
     async def search_knowledge_graph(self, query: str, top_k: int = 10) -> DataAccessResult:
         """Search knowledge graph only (KAG)"""
         return await self.retrieve(query, use_rag=False, use_kag=True, top_k=top_k)
+
+    async def list_all_files(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """List all files directly from Blob Storage"""
+        if self.blob_retriever:
+            return await self.blob_retriever.list_all(limit=limit)
+        return []
     
     def get_access_log(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Get recent data access log for auditing"""
@@ -253,7 +324,8 @@ class DataAccessLayer:
         """Check health of data access systems"""
         return {
             "rag_available": self.rag_retriever is not None and self.rag_retriever.health_check() if self.rag_retriever else False,
-            "kag_available": self.kag_retriever is not None and self.kag_retriever.health_check() if self.kag_retriever else False
+            "kag_available": self.kag_retriever is not None and self.kag_retriever.health_check() if self.kag_retriever else False,
+            "blob_available": self.blob_retriever is not None and self.blob_retriever.health_check() if self.blob_retriever else False
         }
 
 

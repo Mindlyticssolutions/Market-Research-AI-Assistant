@@ -11,8 +11,10 @@ import uuid
 import sys
 import os
 
-# Add agents to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..'))
+# Add project root to path to allow importing 'agents'
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..', '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 router = APIRouter()
 
@@ -24,6 +26,7 @@ class ChatMessage(BaseModel):
     agent: Optional[str] = None
     timestamp: Optional[datetime] = None
     sources: Optional[List[str]] = None
+    plot: Optional[str] = None # Base64 encoded image
 
 
 class ChatRequest(BaseModel):
@@ -41,13 +44,20 @@ class ChatResponse(BaseModel):
     response: str
     timestamp: datetime
     sources: Optional[List[str]] = None  # RAG sources used
+    plot: Optional[str] = None # Base64 encoded image
 
 
 # In-memory session storage (replace with database for production)
 chat_sessions: dict[str, List[ChatMessage]] = {}
 
 
-async def _execute_agent(agent_name: str, query: str, context: dict = None, history: List[ChatMessage] = None) -> tuple[str, List[str]]:
+async def _execute_agent(
+    agent_name: str, 
+    query: str, 
+    context: dict = None, 
+    history: List[ChatMessage] = None,
+    callback = None
+) -> tuple[str, List[str]]:
     """
     Execute query with specified agent using RAG/KAG context
     
@@ -56,9 +66,7 @@ async def _execute_agent(agent_name: str, query: str, context: dict = None, hist
         query: User's query
         context: Additional context
         history: Conversation history for multi-turn context
-    
-    Returns:
-        tuple of (response_content, sources)
+        callback: Optional async callback for streaming events
     """
     try:
         # Import agent registry
@@ -87,16 +95,20 @@ async def _execute_agent(agent_name: str, query: str, context: dict = None, hist
             full_context["conversation_history"] = history_text
         
         # Execute with RAG/KAG context (handled internally by BaseAgent)
-        result = await agent.execute(query, full_context)
+        result = await agent.execute(query, full_context, callback=callback)
         
+        print(f"DEBUG: Agent {agent_name} execution complete. Success: {result.success}", flush=True)
         if result.success:
-            return result.content, result.sources or []
+            content_preview = result.content[:100] if result.content else "None"
+            print(f"DEBUG: Returning content (len {len(result.content or '')}): {content_preview}...", flush=True)
+            return result.content, result.sources or [], result.plot
         else:
-            return f"Agent error: {result.error}", []
+            print(f"DEBUG: Returning error: {result.error}", flush=True)
+            return f"Agent error: {result.error}", [], None
             
     except Exception as e:
         print(f"Agent execution error: {e}")
-        return f"I encountered an error processing your request: {str(e)}", []
+        return f"I encountered an error processing your request: {str(e)}", [], None
 
 
 @router.post("/send", response_model=ChatResponse)
@@ -120,7 +132,7 @@ async def send_message(request: ChatRequest):
     chat_sessions[session_id].append(user_msg)
     
     # Execute agent with RAG/KAG context and conversation history
-    response_content, sources = await _execute_agent(
+    response_content, sources, plot = await _execute_agent(
         agent_name=request.agent,
         query=request.message,
         context=request.context,
@@ -133,7 +145,8 @@ async def send_message(request: ChatRequest):
         content=response_content,
         agent=request.agent,
         timestamp=datetime.utcnow(),
-        sources=sources
+        sources=sources,
+        plot=plot
     )
     chat_sessions[session_id].append(assistant_msg)
     
@@ -142,7 +155,8 @@ async def send_message(request: ChatRequest):
         agent=request.agent,
         response=response_content,
         timestamp=datetime.utcnow(),
-        sources=sources
+        sources=sources,
+        plot=plot
     )
 
 
@@ -226,11 +240,21 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 "agent": agent
             })
             
+            # Define callback for streaming intermediate events
+            async def agent_callback(event_type: str, content: str):
+                await websocket.send_json({
+                    "type": event_type, # thinking, code_execution, observation
+                    "content": content,
+                    "agent": agent,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+
             # Execute agent with RAG/KAG and history
-            response_content, sources = await _execute_agent(
+            response_content, sources, plot = await _execute_agent(
                 agent_name=agent,
                 query=message,
-                history=chat_sessions[session_id][:-1]  # Exclude current message
+                history=chat_sessions[session_id][:-1],  # Exclude current message
+                callback=agent_callback
             )
             
             # Add to history
@@ -239,7 +263,8 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 content=response_content,
                 agent=agent,
                 timestamp=datetime.utcnow(),
-                sources=sources
+                sources=sources,
+                plot=plot
             )
             chat_sessions[session_id].append(assistant_msg)
             
@@ -249,6 +274,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 "agent": agent,
                 "content": response_content,
                 "sources": sources,
+                "plot": plot,
                 "timestamp": datetime.utcnow().isoformat()
             })
             

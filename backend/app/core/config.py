@@ -93,18 +93,6 @@ class Settings(BaseSettings):
         except (IndexError, ValueError):
             return ""
 
-    @property
-    def azure_storage_sas_token(self) -> str:
-        """Extract SAS token from connection string if not explicitly set"""
-        if self.AZURE_STORAGE_SAS_TOKEN:
-            return self.AZURE_STORAGE_SAS_TOKEN
-        if not self.AZURE_STORAGE_CONNECTION_STRING:
-            return ""
-        try:
-            return [p for p in self.AZURE_STORAGE_CONNECTION_STRING.split(";") if p.startswith("SharedAccessSignature=")][0].split("=")[1]
-        except (IndexError, ValueError):
-            return ""
-
 
 @lru_cache()
 def get_settings() -> Settings:

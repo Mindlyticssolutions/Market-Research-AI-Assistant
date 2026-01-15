@@ -19,24 +19,6 @@ class AzureAIFoundryClient:
         self.deployment = settings.AZURE_OPENAI_DEPLOYMENT
         self.api_version = settings.AZURE_OPENAI_API_VERSION
         self._client = None
-        self._initialization_error = None
-        
-        # Validate configuration
-        if not self.endpoint:
-            self._initialization_error = "AZURE_OPENAI_ENDPOINT is not configured"
-            print(f"❌ Azure OpenAI Config Error: {self._initialization_error}")
-        if not self.api_key:
-            self._initialization_error = "AZURE_OPENAI_API_KEY is not configured"
-            print(f"❌ Azure OpenAI Config Error: {self._initialization_error}")
-        if not self.deployment:
-            self._initialization_error = "AZURE_OPENAI_DEPLOYMENT is not configured"
-            print(f"❌ Azure OpenAI Config Error: {self._initialization_error}")
-        
-        if not self._initialization_error:
-            print(f"✅ Azure OpenAI Client initialized:")
-            print(f"   Endpoint: {self.endpoint}")
-            print(f"   Deployment: {self.deployment}")
-            print(f"   API Version: {self.api_version}")
     
     @classmethod
     def get_instance(cls) -> "AzureAIFoundryClient":
@@ -48,56 +30,142 @@ class AzureAIFoundryClient:
     @property
     def client(self) -> AsyncAzureOpenAI:
         """Get or create OpenAI client"""
-        if self._initialization_error:
-            raise Exception(f"Azure OpenAI client not initialized: {self._initialization_error}")
-            
         if self._client is None:
-            try:
-                self._client = AsyncAzureOpenAI(
-                    azure_endpoint=self.endpoint,
-                    api_key=self.api_key,
-                    api_version=self.api_version
-                )
-                print(f"✅ AsyncAzureOpenAI client created successfully")
-            except Exception as e:
-                error_msg = f"Failed to create Azure OpenAI client: {str(e)}"
-                print(f"❌ {error_msg}")
-                raise Exception(error_msg)
+            self._client = AsyncAzureOpenAI(
+                azure_endpoint=self.endpoint,
+                api_key=self.api_key,
+                api_version=self.api_version
+            )
         return self._client
     
+    def _format_tools(self, tools: List[dict]) -> List[dict]:
+        """Format expanded or simplified tools to OpenAI schema"""
+        if not tools:
+            return None
+            
+        formatted_tools = []
+        for tool in tools:
+            # 1. If already in full OpenAI function format, use as is
+            if "type" in tool and tool["type"] == "function":
+                formatted_tools.append(tool)
+                continue
+            
+            # 2. Extract components
+            name = tool.get("name")
+            description = tool.get("description", "")
+            parameters = tool.get("parameters", {})
+            
+            # 3. Determine if parameters is already a JSON schema or a simple dict
+            if isinstance(parameters, dict) and parameters.get("type") == "object":
+                # It's already a full JSON schema
+                final_params = parameters
+            else:
+                # Convert simple dict {name: type} to JSON schema
+                properties = {}
+                required = []
+                for key, value in parameters.items():
+                    # Handle simple types (string, int, etc)
+                    if isinstance(value, str):
+                        prop_type = "string"
+                        if value in ["int", "integer"]: prop_type = "integer"
+                        elif value == "float": prop_type = "number"
+                        elif value in ["bool", "boolean"]: prop_type = "boolean"
+                        elif value == "list": prop_type = "array"
+                        elif value == "dict": prop_type = "object"
+                        properties[key] = {"type": prop_type}
+                    else:
+                        # Value is already a schema fragment (e.g. {"type": "string", "enum": [...]})
+                        properties[key] = value
+                    required.append(key)
+                
+                final_params = {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+
+            formatted_tools.append({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": final_params
+                }
+            })
+        return formatted_tools
+
     async def chat_completion(
         self,
         messages: list,
         temperature: float = 0.7,
-        max_tokens: int = 1000
-    ) -> str:
+        max_tokens: int = 1000,
+        **kwargs
+    ):
         """Get chat completion from Azure OpenAI"""
         try:
             # Convert to OpenAI message format if needed
             formatted_messages = []
             for msg in messages:
-                if hasattr(msg, 'content'):
-                    # It's a Message object
-                    role = 'system' if 'System' in type(msg).__name__ else 'user'
+                if isinstance(msg, dict):
+                    formatted_messages.append(msg)
+                elif hasattr(msg, 'role') and hasattr(msg, 'content'):
+                    # Pydantic models or OpenAI message objects
+                    d = {
+                        "role": msg.role,
+                        "content": msg.content,
+                    }
+                    if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                        d["tool_calls"] = msg.tool_calls
+                    formatted_messages.append(d)
+                elif hasattr(msg, 'content'):
+                    # Fallback for simpler message objects
+                    msg_type = type(msg).__name__.lower()
+                    if 'system' in msg_type:
+                        role = 'system'
+                    elif 'assistant' in msg_type:
+                        role = 'assistant'
+                    elif 'tool' in msg_type:
+                        role = 'tool'
+                    else:
+                        role = 'user'
                     formatted_messages.append({"role": role, "content": msg.content})
                 else:
-                    # Already a dict
                     formatted_messages.append(msg)
+            
+            # Format tools if present
+            tools = kwargs.get('tools')
+            formatted_tools = self._format_tools(tools) if tools else None
+
+            print(f"DEBUG: [AzureClient] Sending {len(formatted_messages)} messages with {len(formatted_tools) if formatted_tools else 0} tools, tool_choice={kwargs.get('tool_choice', 'auto')}", flush=True)
             
             response = await self.client.chat.completions.create(
                 model=self.deployment,
                 messages=formatted_messages,
                 temperature=temperature,
-                max_tokens=max_tokens
+                max_tokens=max_tokens,
+                tools=formatted_tools,
+                tool_choice=kwargs.get('tool_choice', 'auto') if formatted_tools else None
             )
-            return response.choices[0].message.content
+            
+            if not response or not hasattr(response, 'choices') or not response.choices:
+                print(f"DEBUG: [AzureClient] Empty response from Azure OpenAI")
+                return None
+                
+            msg = response.choices[0].message
+            print(f"DEBUG: [AzureClient] Response role: {msg.role}, has_content: {bool(msg.content)}, has_tools: {bool(msg.tool_calls)}", flush=True)
+            return msg
         except Exception as e:
-            error_msg = f"Azure OpenAI error with deployment '{self.deployment}': {str(e)}"
-            print(f"❌ {error_msg}")
-            # Check for common errors
-            if "DeploymentNotFound" in str(e) or "deployment" in str(e).lower():
-                error_msg += f"\n💡 Tip: Verify deployment name '{self.deployment}' exists in Azure OpenAI Studio"
-            raise Exception(error_msg)
+            print(f"DEBUG: [AzureClient] Error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            raise Exception(f"Azure OpenAI error: {str(e)}")
+
+    def parse_tool_calls(self, response_message):
+        """Extract tool calls from response message"""
+        if hasattr(response_message, 'tool_calls') and response_message.tool_calls:
+            print(f"DEBUG: [AzureClient] Parsed {len(response_message.tool_calls)} tool calls")
+            return response_message.tool_calls
+        return None
     
     async def simple_chat(self, user_message: str, system_message: str = None) -> str:
         """Simple chat interface"""
@@ -106,7 +174,8 @@ class AzureAIFoundryClient:
             messages.append({"role": "system", "content": system_message})
         messages.append({"role": "user", "content": user_message})
         
-        return await self.chat_completion(messages)
+        response = await self.chat_completion(messages)
+        return response.content if hasattr(response, 'content') else str(response)
 
 
 def get_ai_client() -> AzureAIFoundryClient:

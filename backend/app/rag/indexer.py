@@ -33,7 +33,7 @@ class RAGIndexer:
             azure_search_key=self.key,
             index_name=self.index_name,
             embedding_function=self.embeddings,
-            # We can define additional fields schema if needed, but LangChain handles defaults well
+            search_type="hybrid" # Keep consistent with retriever
         )
 
     async def create_index_if_not_exists(self):
@@ -74,31 +74,7 @@ class RAGIndexer:
                 doc.metadata["chunk_id"] = str(i)
             
             # Helper to split (removed nested define) and upload
-            # Add retry logic for 429 Rate Limits
-            max_retries = 3
-            ids = []
-            import time
-            
-            for attempt in range(max_retries):
-                try:
-                    ids = self.vector_store.add_documents(docs)
-                    break 
-                except Exception as e:
-                    if "429" in str(e) or "RateLimit" in str(e):
-                        if attempt < max_retries - 1:
-                            wait_time = 2 ** (attempt + 1)
-                            print(f"Rate limit hit. Retrying in {wait_time}s...")
-                            # Since this is running in a thread/executor, time.sleep is safer than await if method is not async
-                            # But wait, create_index_if_not_exists is async but index_document is async...
-                            # index_document is async def, so we should use asyncio.sleep
-                            # But self.vector_store.add_documents is blocking.
-                            # We should probably use asyncio.sleep to not block the event loop?
-                            # But if add_documents is blocking, we are already blocking the loop unless we run in executor.
-                            # Given the current architecture, let's use asyncio.sleep just to be idiomatic async
-                            await asyncio.sleep(wait_time)
-                            continue
-                    raise e
-
+            ids = self.vector_store.add_documents(docs)
             chunks_indexed = len(ids)
             
             return {

@@ -20,35 +20,32 @@ class OrchestratorAgent(BaseAgent):
         self.agent_routing = {
             "sql": ["sql", "query", "database", "table", "select", "join"],
             "python": ["code", "python", "script", "analyze", "calculate", "plot", "visualize"],
-            "researcher": ["research", "market", "trend", "competitor", "industry", "report"],
+            "researcher": ["research", "market", "trend", "competitor", "industry", "report", "describe", "about", "list", "files", "schema"],
             "analyst": ["analyze", "statistics", "insight", "pattern", "correlation"],
             "writer": ["write", "report", "summary", "document", "executive"]
         }
     
     def _get_system_prompt(self) -> str:
-        return """You are the Orchestrator Agent for a market research assistant.
-Your role is to:
-1. Understand user queries and route them to the appropriate specialized agent
-2. Coordinate multi-step tasks across multiple agents
-3. Aggregate results from multiple agents into coherent responses
+        return """You are the Orchestrator Agent. Your ONLY job is to route the user's request to the correct specialized agent.
 
-Available agents:
-- SQL Agent: For database queries and SQL generation
-- Python Agent: For code execution and data analysis
-- Researcher Agent: For market research and trend analysis
-- Analyst Agent: For statistical analysis and insights
-- Writer Agent: For report writing and documentation
+AVAILABLE AGENTS:
+1. "python": For data analysis, calculations, coding, plotting, and visualization.
+   - Keywords: run, calculate, plot, analyze, python, code, graph, chart.
+2. "sql": For database queries and SQL.
+   - Keywords: sql, query, database, select, join.
+3. "researcher": For searching files, documents, or general knowledge.
+   - Keywords: search, find, what is, look up.
+4. "analyst": For high-level business insights and recommendations (non-technical).
+5. "writer": For summarizing, writing reports, or editing text.
 
-When responding:
-1. Identify which agent(s) should handle the query
-2. If multiple agents needed, plan the workflow
-3. Summarize the routing decision
-
-IMPORTANT:
-- Be concise (no fluff)
-- At the end of your response, provide 2-3 short "Suggested Next Steps" or follow-up questions based on the conversation context.
-- Format suggestions as a bulleted list titled "Suggestions:"
-"""
+CRITICAL RULES:
+0. Start your thought process with an extremely concise summary (1-3 words) in brackets, e.g., `[Task: Fibonacci]`. 
+   - **IMPORTANT**: ONLY output `[Task: ...]` if you are routing to `sql`, `python` (for EXECUTION), or `researcher`.
+   - If routing to `python` for "TEXT ONLY" (write/show code), DO NOT output `[Task: ...]`. Just go straight to the explanation.
+1. For data execution tasks (run, calculate, analyze, plot, graph), use the `route_to_agent` tool and ALWAYS prefix the query string with "EXECUTE: ".
+2. For "show/write" requests (provide example, how to, show code for, script for), use the `route_to_agent` tool and ALWAYS prefix the query string with "TEXT ONLY: ".
+3. For general knowledge, use the researcher.
+4. - ALWAYS use the `route_to_agent` tool immediately."""
     
     def _get_tools(self) -> List[Dict]:
         return [
@@ -56,60 +53,23 @@ IMPORTANT:
                 "name": "route_to_agent",
                 "description": "Route a query to a specialized agent",
                 "parameters": {
-                    "agent_name": "string",
-                    "query": "string"
+                    "type": "object",
+                    "properties": {
+                        "agent_name": {
+                            "type": "string", 
+                            "enum": ["sql", "python", "researcher", "analyst", "writer"],
+                            "description": "The name of the specialized agent to handle the task"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "The specific query or task to delegate"
+                        }
+                    },
+                    "required": ["agent_name", "query"]
                 }
             }
         ]
     
-    def determine_agent(self, query: str) -> str:
-        """Determine which agent should handle the query"""
-        query_lower = query.lower()
-        
-        scores = {}
-        for agent, keywords in self.agent_routing.items():
-            score = sum(1 for kw in keywords if kw in query_lower)
-            if score > 0:
-                scores[agent] = score
-        
-        if scores:
-            return max(scores, key=scores.get)
-        return "researcher"  # Default to researcher for general queries
-    
-    async def execute(self, query: str, context: Dict = None) -> AgentResponse:
-        """
-        Execute orchestrator logic
-        Routes to appropriate agent or handles multi-agent workflow
-        """
-        try:
-            # Determine target agent
-            target_agent = self.determine_agent(query)
-            
-            # Get the target agent from registry
-            from agents.registry import AgentRegistry
-            agent = AgentRegistry.get_agent(target_agent)
-            
-            if agent:
-                # Execute target agent
-                result = await agent.execute(query, context)
-                return AgentResponse(
-                    content=f"[Routed to {target_agent}]\n\n{result.content}",
-                    agent_name=self.name,
-                    sources=result.sources,
-                    metadata={
-                        "routed_to": target_agent,
-                        "original_metadata": result.metadata
-                    },
-                    success=result.success
-                )
-            else:
-                # Fallback to base execution
-                return await super().execute(query, context)
-                
-        except Exception as e:
-            return AgentResponse(
-                content="",
-                agent_name=self.name,
-                success=False,
-                error=str(e)
-            )
+    async def execute(self, query: str, context: Dict = None, callback=None) -> AgentResponse:
+        """Execute orchestrator logic via ReAct loop"""
+        return await super().execute(query, context, callback=callback)

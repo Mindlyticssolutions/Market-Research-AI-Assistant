@@ -1,22 +1,64 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, Sparkles, Code, ChevronRight, ChevronLeft, Copy, Check, ArrowDown } from 'lucide-react';
+import { Send, Sparkles, Code, ChevronRight, ChevronLeft, Copy, Check, ArrowDown, TrendingUp } from 'lucide-react';
 import { useAppStore } from '@/store/appStore';
 import { useNavigate } from 'react-router-dom';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 
 export function AIAssistant() {
   const navigate = useNavigate();
-  // Use selectors to prevent re-renders when other parts of the store change (like aiScrollPosition)
+
+  // Optimized Title Cleaner
+  const cleanTitle = (text: string) => {
+    // 0. Initial cleanup and suffix stripping (e.g., "| Mode: Text Only")
+    let t = text.replace(/^(Task|Summary|Query):\s*/i, '')
+      .replace(/\s*\|\s*Mode:\s*\w+.*?$/i, '') // Strip backend mode suffix
+      .trim();
+
+    // 1. Aggressively strip everything from start until "to" if it looks like an instruction
+    // Added "provide", "write", "run", etc.
+    if (/^(write|run|create|show|calculate|analyze|plot|visualize|check|determine|find|get|can you|please|show me|I want to|provide|give me)\b/i.test(t)) {
+      // Find the first "to" that isn't inside a word
+      const match = t.match(/\bto\b[:\s]*/i);
+      if (match && match.index !== undefined && match.index < 40) { // Only if "to" is early enough
+        t = t.substring(match.index + match[0].length);
+      }
+    }
+
+    // 2. Multi-pass strip for leading joining words
+    let changed = true;
+    while (changed) {
+      const original = t;
+      t = t.replace(/^(whether|if|a|an|the|is|about|that|checking|calculating|analyzing|plotting|showing|creating|finding)\b[:\s]*/i, '');
+      t = t.replace(/^[:\s-]+/, '');
+      changed = t !== original;
+    }
+
+    // 3. Transform "Check whether a number" -> "Check number"
+    t = t.replace(/^(check|find|get|analyze|calculate|determine)\s+(whether|if|a|an|the|is|to|about)\s+(a|an|the)?/i, '$1 ');
+
+    t = t.trim();
+
+    if (t.length > 0) {
+      t = t.charAt(0).toUpperCase() + t.slice(1);
+    }
+    return t || "Analysis Query";
+  };
+
+  // Use selectors to prevent re-renders...
   const aiMessages = useAppStore(state => state.aiMessages);
   const addAIMessage = useAppStore(state => state.addAIMessage);
   const addQuery = useAppStore(state => state.addQuery);
   const isAIPanelCollapsed = useAppStore(state => state.isAIPanelCollapsed);
   const toggleAIPanel = useAppStore(state => state.toggleAIPanel);
   const setAIScrollPosition = useAppStore(state => state.setAIScrollPosition);
-  
+  const setActivePlotCode = useAppStore(state => state.setActivePlotCode);
+  const setActivePlot = useAppStore(state => state.setActivePlot);
+  const updateQuery = useAppStore(state => state.updateQuery);
+
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -36,7 +78,7 @@ export function AIAssistant() {
       const handleScroll = () => {
         const { scrollTop, scrollHeight, clientHeight } = container;
         setAIScrollPosition(scrollTop); // Save position
-        
+
         const isNearBottom = scrollHeight - Math.ceil(scrollTop) - clientHeight < 250; // Increased threshold
         setShouldAutoScroll(isNearBottom);
       };
@@ -52,7 +94,7 @@ export function AIAssistant() {
         // Check initial button visibility after restoration
         handleScroll();
       }, 0);
-      
+
       return () => container.removeEventListener('scroll', handleScroll);
     }
   }, []);
@@ -61,71 +103,230 @@ export function AIAssistant() {
 
 
 
+  const updateAIMessage = useAppStore(state => state.updateAIMessage);
+  const appendExecutionLog = useAppStore(state => state.appendExecutionLog);
+
   const handleSend = async (text?: string) => {
     const userInput = text || input;
     if (!userInput.trim()) return;
 
+    // 1. Add User Message
     addAIMessage('user', userInput);
     setInput('');
-    // Reset textarea height
     const textarea = document.querySelector('textarea');
-    if (textarea) {
-      textarea.style.height = 'auto';
-    }
+    if (textarea) textarea.style.height = 'auto';
     setIsTyping(true);
-    setShouldAutoScroll(true); // Always auto-scroll on new message
+    setShouldAutoScroll(true);
+
+    setActivePlot(null);
+    setActivePlotCode(null);
 
     try {
-      // Import chat service dynamically to avoid circular deps
+      // 2. Add empty Assistant Message (placeholder)
+      // We pass empty content. The store will init logs.
+      const messageId = addAIMessage('assistant', '');
+      let currentQueryId: string | null = null;
+
+      // 3. Import chat service for URL
       const { chatService } = await import('@/services/chatService');
-      
-      // Call backend API
-      const response = await chatService.sendMessage(userInput, 'orchestrator');
-      
-      let fullResponse = response.response;
-      let suggestions: string[] = [];
-      let code: string | undefined;
+      const wsUrl = chatService.getStreamUrl();
 
-      // Extract code if present in response
-      if (fullResponse.includes('```')) {
-        const codeMatch = fullResponse.match(/```(?:\w+)?\n?([\s\S]*?)```/);
-        code = codeMatch ? codeMatch[1].trim() : undefined;
-        // Only strip the code from the message if we successfully extracted it
-        if (code) {
-           fullResponse = fullResponse.replace(/```(?:\w+)?\n?[\s\S]*?```/g, '').trim();
+      // 4. Connect WebSocket
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        console.log("WebSocket connected");
+        ws.send(JSON.stringify({
+          message: userInput,
+          agent: 'orchestrator' // Default agent
+        }));
+
+        // Add a safety timeout (e.g. 180 seconds for complex multi-agent queries)
+        const timeout = setTimeout(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            console.warn("WebSocket timeout reached");
+            ws.close();
+            updateAIMessage(messageId, {
+              content: "The request timed out. Please try again or check the backend logs.",
+              isThinking: false
+            });
+            setIsTyping(false);
+          }
+        }, 180000);
+
+        (ws as any)._timeout = timeout;
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        console.log("WS Message received:", data.type, data);
+
+        if (data.type === 'status') {
+          // e.g. "processing"
+        } else if (data.type === 'thinking') {
+          appendExecutionLog(messageId, data.content);
+        } else if (data.type === 'query_summary') {
+          console.log(`DEBUG: Updating query ${currentQueryId} with summary: ${data.content}`);
+
+          const cleaned = cleanTitle(data.content);
+          const shortTitle = (cleaned.length > 35 ? cleaned.substring(0, 32) + "..." : cleaned) || "Analysis Query";
+          console.log(`DEBUG: Final shortTitle: "${shortTitle}"`);
+
+          if (currentQueryId) {
+            updateQuery(currentQueryId, {
+              title: shortTitle,
+              prompt: data.content
+            });
+          } else {
+            // Create the query cell early in 'generating' state
+            const newQuery = addQuery(shortTitle, data.content, "");
+            currentQueryId = newQuery.id;
+            updateQuery(currentQueryId, { status: 'generating' });
+          }
+        } else if (data.type === 'code_execution') {
+          appendExecutionLog(messageId, "Running python code in sandbox...");
+
+          // Sync with Sandbox
+          let codeToSync = data.content;
+          // Extract code if wrapped in markdown
+          if (codeToSync.includes('```')) {
+            const match = codeToSync.match(/```(?:\w+)?\n?([\s\S]*?)```/);
+            if (match) codeToSync = match[1].trim();
+          }
+          // Also strip "Running python code:\n" prefix if present from the log message
+          // Also strip "Running python code:\n" prefix if present from the log message
+          const prefixMatch = codeToSync.match(/^Running\s+\w+\s+code:\n/i);
+          if (prefixMatch) {
+            codeToSync = codeToSync.substring(prefixMatch[0].length);
+          } else if (codeToSync.startsWith("Running")) {
+            // Fallback for other variations
+            const parts = codeToSync.split(":\n");
+            if (parts.length > 1) {
+              codeToSync = parts.slice(1).join(":\n");
+            }
+          }
+
+          updateAIMessage(messageId, {
+            wasAutoSynced: true,
+            code: codeToSync // Show code in chat even for auto runs
+          });
+
+          // Update Sandbox Store - Use existing query if created by query_summary
+          if (currentQueryId) {
+            updateQuery(currentQueryId, {
+              code: codeToSync,
+              status: 'running'
+            });
+          } else {
+            // Smartly clean the initial title
+            const cleaned = cleanTitle(userInput);
+            const initialTitle = (cleaned.length > 35 ? cleaned.substring(0, 32) + "..." : cleaned) || "New Query";
+            console.log(`DEBUG: Final initialTitle: "${initialTitle}"`);
+
+            const newQuery = addQuery(initialTitle, userInput, codeToSync);
+            currentQueryId = newQuery.id;
+            updateQuery(currentQueryId, { status: 'running' });
+          }
+
+          // navigate('/sandbox');
+          // navigate('/sandbox');
+          toast.info("Running code in Sandbox...", {
+            description: "Check the Sandbox page to see live execution.",
+            action: {
+              label: "Go to Sandbox",
+              onClick: () => navigate('/sandbox')
+            }
+          });
+
+        } else if (data.type === 'observation') {
+          appendExecutionLog(messageId, data.content);
+
+          // Update the notebook cell with the result
+          if (currentQueryId) {
+            updateQuery(currentQueryId, {
+              output: data.content,
+              status: data.content.toLowerCase().includes("error") ? 'error' : 'success'
+            });
+          }
+        } else if (data.type === 'response') {
+          console.log("Received final response, clearing timeout");
+          if ((ws as any)._timeout) clearTimeout((ws as any)._timeout);
+
+          // Final response
+          let fullResponse = data.content;
+          let suggestions: string[] = [];
+          let code: string | undefined;
+          let plot: string | undefined = data.plot;
+
+          // Parse code/suggestions (reuse existing logic)
+          if (fullResponse.includes('```')) {
+            const codeMatch = fullResponse.match(/```(?:\w+)?\n?([\s\S]*?)```/);
+            code = codeMatch ? codeMatch[1].trim() : undefined;
+            if (code) {
+              fullResponse = fullResponse.replace(/```(?:\w+)?\n?[\s\S]*?```/g, '').trim();
+            }
+          }
+
+          const suggestionMatch = fullResponse.match(/(?:^|\n)(?:Suggestions|Suggested Next Steps):([\s\S]*)$/i);
+          if (suggestionMatch) {
+            const suggestionText = suggestionMatch[1];
+            suggestions = suggestionText.split('\n').map(l => l.trim()).filter(l => l.startsWith('-') || l.startsWith('•')).map(l => l.substring(1).trim());
+            fullResponse = fullResponse.substring(0, suggestionMatch.index).trim();
+          }
+
+          updateAIMessage(messageId, {
+            content: fullResponse,
+            code,
+            suggestions: suggestions.length > 0 ? suggestions : undefined,
+            plot,
+            isThinking: false
+          });
+
+          if (plot) {
+            const setActivePlot = useAppStore.getState().setActivePlot;
+            setActivePlot(plot);
+            if (code) setActivePlotCode(code);
+          }
+
+          setIsTyping(false);
+          ws.close();
+        } else if (data.type === 'error') {
+          if ((ws as any)._timeout) clearTimeout((ws as any)._timeout);
+          updateAIMessage(messageId, {
+            content: `Error: ${data.message}`,
+            isThinking: false
+          });
+          setIsTyping(false);
+          ws.close();
         }
-      }
+      };
 
-      // Extract suggestions (looking for "Suggestions:" block)
-      const suggestionMatch = fullResponse.match(/(?:^|\n)(?:Suggestions|Suggested Next Steps):([\s\S]*)$/i);
-      if (suggestionMatch) {
-         const suggestionText = suggestionMatch[1];
-         suggestions = suggestionText
-           .split('\n')
-           .map(line => line.trim())
-           .filter(line => line.startsWith('-') || line.startsWith('•'))
-           .map(line => line.substring(1).trim());
-         
-         // Remove suggestions from displayed content
-         fullResponse = fullResponse.substring(0, suggestionMatch.index).trim();
-      }
-      
-      addAIMessage('assistant', fullResponse, code, suggestions.length > 0 ? suggestions : undefined);
+      ws.onclose = () => {
+        if ((ws as any)._timeout) clearTimeout((ws as any)._timeout);
+        setIsTyping(false);
+      };
+
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        updateAIMessage(messageId, {
+          content: "Connection error. Please ensure backend is running.",
+          isThinking: false
+        });
+        setIsTyping(false);
+      };
 
     } catch (error) {
-      console.error('Chat error:', error);
-      // Fallback to showing error message
-      addAIMessage(
-        'assistant',
-        `I encountered an issue connecting to the backend. Please make sure the server is running at http://localhost:8000.`
-      );
-    } finally {
+      console.error("Setup error:", error);
       setIsTyping(false);
     }
   };
 
   const handleSendToSandbox = (code: string, prompt: string) => {
-    addQuery(prompt, code);
+    // Smartly clean the title for manual send
+    const cleaned = cleanTitle(prompt);
+    const displayTitle = (cleaned.length > 35 ? cleaned.substring(0, 32) + "..." : cleaned) || "Manual Query";
+
+    addQuery(displayTitle, prompt, code);
     navigate('/sandbox');
   };
 
@@ -176,7 +377,7 @@ export function AIAssistant() {
       </div>
 
       {/* Messages */}
-      <div 
+      <div
         ref={messagesContainerRef}
         className="flex-1 overflow-y-auto p-4 space-y-4"
       >
@@ -212,8 +413,42 @@ export function AIAssistant() {
                     : 'bg-muted text-foreground'
                 )}
               >
-                <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-                
+                {/* Thinking Process */}
+                {(message.executionLogs && message.executionLogs.length > 0) && (
+                  <div className="mb-3 rounded-lg border border-border/50 bg-background/50 overflow-hidden">
+                    <button
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground hover:bg-muted/50 transition-colors"
+                      onClick={(e) => {
+                        const logs = e.currentTarget.nextElementSibling;
+                        logs?.classList.toggle('hidden');
+                        e.currentTarget.querySelector('svg')?.classList.toggle('rotate-180');
+                      }}
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      Thinking Process ({message.executionLogs.length} steps)
+                      <ChevronRight className="w-3.5 h-3.5 ml-auto transition-transform" />
+                    </button>
+                    <div className="hidden border-t border-border/50 bg-editor-bg p-3 space-y-2">
+                      {message.executionLogs.map((log, i) => (
+                        <div key={i} className="flex gap-2 text-xs font-mono text-muted-foreground/80">
+                          <span className="opacity-50 select-none">{(i + 1).toString().padStart(2, '0')}</span>
+                          <span className="whitespace-pre-wrap font-mono">{log}</span>
+                        </div>
+                      ))}
+                      {message.isThinking && (
+                        <div className="flex gap-2 text-xs text-primary animate-pulse">
+                          <span className="opacity-50">..</span>
+                          <span>Thinking...</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {message.content && (
+                  <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                )}
+
                 {message.code && (
                   <div className="mt-3 rounded-lg overflow-hidden border border-border/50">
                     <div className="flex items-center justify-between px-3 py-2 bg-editor-bg border-b border-border/50">
@@ -235,20 +470,22 @@ export function AIAssistant() {
                     <pre className="p-3 text-xs font-mono bg-editor-bg text-foreground overflow-x-auto">
                       {message.code}
                     </pre>
-                    <div className="px-3 py-2 bg-editor-bg border-t border-border/50">
-                      <Button
-                        size="sm"
-                        onClick={() => handleSendToSandbox(message.code!, message.content)}
-                        className="w-full gap-2"
-                      >
-                        <Send className="w-3.5 h-3.5" />
-                        Send to Sandbox
-                      </Button>
+                    <div className="px-3 py-2 bg-editor-bg border-t border-border/50 flex gap-2">
+                      {!message.wasAutoSynced && (
+                        <Button
+                          size="sm"
+                          onClick={() => handleSendToSandbox(message.code!, message.content)}
+                          className="flex-1 gap-2"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          Send to Sandbox
+                        </Button>
+                      )}
                     </div>
                   </div>
                 )}
               </div>
-              
+
               {/* Suggestions Chips */}
               {message.suggestions && message.suggestions.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-2 max-w-[90%] pl-1">
@@ -282,11 +519,11 @@ export function AIAssistant() {
             </div>
           </motion.div>
         )}
-        
+
         <div ref={messagesEndRef} />
-        
+
       </div>
-      
+
 
 
       {/* Input */}

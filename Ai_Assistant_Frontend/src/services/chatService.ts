@@ -21,6 +21,7 @@ export interface ChatResponse {
   response: string;
   timestamp: string;
   sources?: string[];
+  plot?: string;
 }
 
 export interface ChatRequest {
@@ -44,10 +45,10 @@ export const chatService = {
       agent,
       session_id: currentSessionId,
     });
-    
+
     // Store session ID for conversation continuity
     currentSessionId = response.data.session_id;
-    
+
     return response.data;
   },
 
@@ -58,7 +59,7 @@ export const chatService = {
     if (!currentSessionId) {
       return { messages: [], message_count: 0 };
     }
-    
+
     const response = await axios.get(`${API_BASE_URL}/history/${currentSessionId}`);
     return response.data;
   },
